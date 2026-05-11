@@ -14,11 +14,11 @@ date: 2026-05-11
 
 ## Why Biomedical Literature Needs a Different Approach
 
-The biomedical literature problem is unlike any other information retrieval problem. PubMed indexes over 35 million citations. A working clinician or researcher asking "which plasma biomarkers best predict early Alzheimer's disease?" is not looking for the ten most popular documents about Alzheimer's or biomarkers — they are looking for specific, evidenced, traceable answers that can inform a real decision.
+The biomedical literature problem is unlike any other information retrieval problem. PubMed indexes over 35 million citations. A working clinician or researcher asking "which plasma biomarkers best predict early Alzheimer's disease?" is not looking for the ten most popular documents about Alzheimer's or biomarkers. They are looking for specific, evidenced, traceable answers that can inform a real decision.
 
 General-purpose RAG systems fall short here for three reasons.
 
-**Precision matters more than recall.** A chatbot that confidently synthesises an answer from tangentially relevant papers is worse than useless in a clinical context — it is dangerous. An answer needs to be traceable to the specific passage that supports it, with an explicit statement of how strong that support is.
+**Precision matters more than recall.** A chatbot that confidently synthesises an answer from tangentially relevant papers is worse than useless in a clinical context. An answer needs to be traceable to the specific passage that supports it, with an explicit statement of how strong that support is.
 
 **The vocabulary is highly specialised.** Biomedical text is dense with abbreviations (PD-L1, APOE4, pTau217), statistical notation (AUC, HR, CI), and entity names that carry the entire discriminative signal for a query. Semantic embeddings trained on general corpora can miss the distinction between "AD biomarkers" and "cardiovascular biomarkers" because both look superficially similar in vector space.
 
@@ -71,7 +71,7 @@ AnswerSynthesizer      ← reasoning chain + confidence      ← Posts 3 & 4
 DecisionOutput         ← structured, auditable answer
 ```
 
-Each stage is a separate class with a single responsibility. The design is intentional: you can upgrade any one stage — swap BM25 for dense embeddings, or replace the rule-based synthesizer with an LLM — without touching the rest of the pipeline.
+Each stage is a separate class with a single responsibility. The design is intentional: you can upgrade any one stage like swap BM25 for dense embeddings, or replace the rule-based synthesizer with an LLM. 
 
 ---
 
@@ -85,7 +85,7 @@ Not all biomedical questions are the same. "What is the mechanism of PD-L1 inhib
 
 These different intents should retrieve from different parts of a paper and weight different evidence types differently. A mechanism query should prioritise Methods and Results sections. A treatment comparison should prioritise Results and Discussion. A definition query should prioritise the Introduction and Abstract.
 
-BioRAG classifies queries into seven intent types — `mechanism`, `comparison`, `treatment`, `diagnosis`, `prognosis`, `epidemiology`, and `general` — by matching trigger phrases against the query. This drives section weighting in the reranker downstream.
+BioRAG classifies queries into seven intent types — `mechanism`, `comparison`, `treatment`, `diagnosis`, `prognosis`, `epidemiology`, and `general`. It is done by matching trigger phrases against the query. This drives section weighting in the reranker downstream.
 
 **What this looks like in practice:**
 
@@ -105,9 +105,9 @@ Entities: ["CRE", "Ceftazidime-avibactam", "Colistin"]
 
 ### Entity Extraction
 
-Biomedical queries are almost always anchored by one or two named entities — a disease, a gene, a drug, a pathogen. These entities are the discriminative signal that separates "Alzheimer's biomarkers" from "cardiovascular biomarkers" even when both queries contain the word "biomarker" many times over.
+Biomedical queries are almost always anchored by one or two named entities i.e. a disease, a gene, a drug, a pathogen. These entities are the discriminative signal that separates "Alzheimer's biomarkers" from "cardiovascular biomarkers" even when both queries contain the word "biomarker" many times over.
 
-The `QueryAnalyzer` extracts entities by identifying capitalised multi-word terms, filtered against a blocklist of question words (`What`, `Which`, `How`…). This is intentionally lightweight — no NER model, no external API.
+The `QueryAnalyzer` extracts entities by identifying capitalised multi-word terms, filtered against a blocklist of question words (`What`, `Which`, `How` etc). This is intentionally lightweight i.e. no NER model, no external API.
 
 **Key limitation: case sensitivity.** The entity extractor relies on capitalisation. A query typed entirely in lowercase — `alzheimer's disease biomarkers` — yields no entities. This matters because entity presence drives the false-positive suppression penalty in the reranker (covered in Post 2). We address this with a `_GENERIC_BIO_TERMS` approach rather than entity-only logic, but a case-insensitive NER model would be the cleaner long-term fix.
 
@@ -134,7 +134,7 @@ for token in tokens:
 
 ## Stage 2: BM25 Retrieval
 
-Once the query is analysed, the `InvertedIndex` retrieves the top-K candidate chunks using BM25 — specifically the Okapi BM25 variant.
+Once the query is analysed, the `InvertedIndex` retrieves the top-K candidate chunks using BM25, specifically the Okapi BM25 variant.
 
 ### Why BM25 and Not Dense Embeddings?
 
@@ -144,7 +144,7 @@ Dense embedding models (sentence-transformers, OpenAI text-embedding-3) encode s
 
 For biomedical retrieval, it becomes a liability in two ways.
 
-First, the vocabulary is so specialised that semantic proximity in embedding space can mislead. "APOE4 genotype" and "cardiovascular risk gene" might map to nearby vectors even though they describe entirely different biology. BM25 matches on exact tokens — and in biomedicine, exact tokens are the evidence.
+First, the vocabulary is so specialised that semantic proximity in embedding space can mislead. "APOE4 genotype" and "cardiovascular risk gene" might map to nearby vectors even though they describe entirely different biology. BM25 matches on exact tokens and exact tokens are the evidence in biomedicine.
 
 Second, dense embeddings require either a GPU, an external API call, or a large local model. BM25 is pure arithmetic over a term-frequency index. For a system that emphasises zero external dependencies and auditability, this matters. BioRAG's core engine runs with no installs beyond the Python standard library.
 
@@ -178,7 +178,7 @@ where `|d|` is the chunk length and `avgdl` is the average chunk length across t
 
 **Tuning `K1` and `B`:** The defaults work well but are not optimised for any specific corpus. Run your retrieval eval harness (covered in Post 5) with a grid search over `K1 ∈ {1.0, 1.2, 1.5, 2.0}` and `B ∈ {0.5, 0.65, 0.75, 0.9}`. For a corpus dominated by short PubMed abstracts, a lower `B` (0.5) tends to perform better because length variation between chunks is small. For full-text PMC articles with long methods sections, a higher `B` (0.75–0.9) normalises the length advantage those sections get.
 
-**Tuning `chunk_size`:** Smaller chunks (256 tokens) improve precision — the retrieved passage is tightly about one thing — but hurt recall when the key sentence is surrounded by context. Larger chunks (1024 tokens) improve recall but return more noise per hit. 512 with 64-token overlap is a reasonable default for mixed abstract/full-text corpora.
+**Tuning `chunk_size`:** Smaller chunks (256 tokens) improve precision. The retrieved passage is tightly about one thing, but hurt recall when the key sentence is surrounded by context. Larger chunks (1024 tokens) improve recall but return more noise per hit. 512 with 64-token overlap is a reasonable default for mixed abstract/full-text corpora.
 
 ### The False Positive Problem
 
@@ -186,7 +186,7 @@ BM25's fundamental weakness for multi-disease corpora is that it rewards term pr
 
 In a general-domain system, this is tolerable. In a decision-support system where a clinician is relying on the returned evidence nodes, surfacing an irrelevant paper at 75% relevance is a serious quality problem. We observed exactly this after ingesting Alzheimer's papers alongside oncology papers.
 
-The root cause is at the retrieval stage. The fix, however, lives in the reranker — which has access to both the query's entity tokens and the chunk content, and can apply a structured penalty. We will cover this in full in Post 2.
+The root cause is at the retrieval stage. The fix, however, lives in the reranker which has access to both the query's entity tokens and the chunk content, and can apply a structured penalty. We will cover this in full in Post 2.
 
 ### How to Improve Retrieval
 
@@ -225,13 +225,13 @@ retrieved_chunks = [
 ]
 ```
 
-These 15 chunks are raw BM25 candidates. Some are excellent. Some — like that lung cancer paper at rank 9 — are off-topic papers that matched on generic terms. The next stage, the Reranker, is where precision is recovered.
+These 15 chunks are raw BM25 candidates. Some are excellent. Some like that lung cancer paper at rank 9 are off-topic papers that matched on generic terms. The next stage, the Reranker, is where precision is recovered.
 
 ---
 
 ## Coming Up in Post 2
 
-In the next post we go deep into the Reranker. We will look at how section weighting (prioritising Results over Introduction for factual queries) interacts with term density scoring — and how the discriminative-token recall penalty was designed to suppress the false positive described above.
+In the next post we go deep into the Reranker. We will look at how section weighting (prioritising Results over Introduction for factual queries) interacts with term density scoring. Additionally, we will see how the discriminative-token recall penalty was designed to suppress the false positive described above.
 
 We will trace the two-stage debugging process that revealed why common clinical verbs like "predict" and "detect" must be treated as generic rather than discriminative, even when they appear in the query. A lung cancer paper showing up at 65% relevance for an Alzheimer's query after the first fix is a useful lesson in how BM25's term presence bias propagates into the reranker unless you're precise about what "discriminative" means.
 
@@ -239,4 +239,4 @@ We will also cover the `EvidenceClassifier` — how a chunk is labelled as `dire
 
 ---
 
-*BioRAG is built in pure Python stdlib. The core engine — BM25 index, reranker, evidence classifier, synthesizer — has zero external dependencies. PubMed ingestion requires only `requests`. LLM answer synthesis requires only `anthropic`.*
+*BioRAG is built in pure Python stdlib. The core engine — BM25 index, reranker, evidence classifier, synthesizer — has zero external dependencies. PubMed ingestion requires only `requests`. LLM answer synthesis requires only `anthropic`. Github: https://github.com/ricchasethi/rag-biomedical-decision*
