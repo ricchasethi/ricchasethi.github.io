@@ -1,6 +1,6 @@
 ---
 layout: post
-title: "BioRAG"
+title: "BioRAG: Part 2"
 series: "BioRAG"
 part: 2
 date: 2026-05-15
