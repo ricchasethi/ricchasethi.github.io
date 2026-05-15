@@ -1,2 +1,6 @@
 title: Research to Production
 theme: minima
+
+header_pages:
+  - biorag/index.md
+  - about.md
