@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1"><!-- Begin Jekyll SEO tag v2.8.0 -->
+<title>Building BioRAG: A Decision-Support RAG System for Biomedical Literature | Research to Production</title>
+<meta name="generator" content="Jekyll v3.10.0" />
+<meta property="og:title" content="Building BioRAG: A Decision-Support RAG System for Biomedical Literature" />
+<meta property="og:locale" content="en_US" />
+<meta name="description" content="Research to production mindset" />
+<meta property="og:description" content="Research to production mindset" />
+<meta property="og:site_name" content="Research to Production" />
+<meta property="og:type" content="website" />
+<meta name="twitter:card" content="summary" />
+<meta property="twitter:title" content="Building BioRAG: A Decision-Support RAG System for Biomedical Literature" />
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"WebPage","description":"Research to production mindset","headline":"Building BioRAG: A Decision-Support RAG System for Biomedical Literature","url":"/post_04_llm_synthesis_server_mcp.html"}</script>
+<!-- End Jekyll SEO tag -->
+<link rel="stylesheet" href="/assets/main.css"><link type="application/atom+xml" rel="alternate" href="/feed.xml" title="Research to Production" /></head>
+<body><header class="site-header" role="banner">
+
+  <div class="wrapper"><a class="site-title" rel="author" href="/">Research to Production</a><nav class="site-nav">
+        <input type="checkbox" id="nav-trigger" class="nav-trigger" />
+        <label for="nav-trigger">
+          <span class="menu-icon">
+            <svg viewBox="0 0 18 15" width="18px" height="15px">
+              <path d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.032C17.335,0,18,0.665,18,1.484L18,1.484z M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.032C17.335,6.031,18,6.696,18,7.516L18,7.516z M18,13.516C18,14.335,17.335,15,16.516,15H1.484 C0.665,15,0,14.335,0,13.516l0,0c0-0.82,0.665-1.483,1.484-1.483h15.032C17.335,12.031,18,12.695,18,13.516L18,13.516z"/>
+            </svg>
+          </span>
+        </label>
+
+        <div class="trigger"><a class="page-link" href="/biorag/">BioRAG</a><a class="page-link" href="/about/">About</a></div>
+      </nav></div>
+</header>
+<main class="page-content" aria-label="Content">
+      <div class="wrapper">
+        <article class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Building BioRAG: A Decision-Support RAG System for Biomedical Literature</h1>
+  </header>
+
+  <div class="post-content">
+    <h1 id="building-biorag-a-decision-support-rag-system-for-biomedical-literature">Building BioRAG: A Decision-Support RAG System for Biomedical Literature</h1>
+
+<p><strong>Part 4 of 5 — LLM Answer Synthesis, Prompt Design, and Serving the Engine</strong></p>
+
+<hr />
+
+<h2 id="where-we-left-off">Where We Left Off</h2>
+
+<p>Post 3 ended with a fully assembled <code class="language-plaintext highlighter-rouge">DecisionOutput</code>.Confidence score derived from four explicit inputs, reasoning chain documenting every inference step, knowledge gaps surfaced as first-class fields. The rule-based <code class="language-plaintext highlighter-rouge">AnswerSynthesizer</code> concatenated excerpts, flagged contradictions with a warning marker, and found common terms across sources.</p>
+
+<p>That is a valid baseline. It is auditable, dependency-free, and fast. But it does not write prose. For users who want natural language output, BioRAG provides <code class="language-plaintext highlighter-rouge">ClaudeSynthesizer</code> — a drop-in replacement that swaps only the prose generation step while leaving the rest of the pipeline identical.</p>
+
+<p>This post covers three things: the design of <code class="language-plaintext highlighter-rouge">ClaudeSynthesizer</code> and the prompt choices that shaped it, the FastAPI server and the MCP server.</p>
+
+<hr />
+
+<h2 id="the-llm-synthesizer">The LLM Synthesizer</h2>
+
+<p><code class="language-plaintext highlighter-rouge">ClaudeSynthesizer</code> is a <strong>subclass</strong> of <code class="language-plaintext highlighter-rouge">AnswerSynthesizer</code>, not a parallel implementation. It overrides exactly one method: <code class="language-plaintext highlighter-rouge">synthesize()</code>. The reasoning chain construction, confidence formula, gap detection, and follow-up generation are all inherited without modification.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">class</span> <span class="nc">ClaudeSynthesizer</span><span class="p">(</span><span class="n">AnswerSynthesizer</span><span class="p">):</span>
+    <span class="n">MODEL</span> <span class="o">=</span> <span class="s">"claude-sonnet-4-6"</span>
+    <span class="n">MAX_TOKENS</span> <span class="o">=</span> <span class="mi">1500</span>
+</code></pre></div></div>
+
+<p>By the time a prompt reaches Claude, scoring, confidence computation, and gap detection have already run. Claude’s only job is to write 2–4 paragraphs from the numbered excerpts it receives. This separation prevents the LLM from filling evidence gaps with training knowledge. This can be a problem that is much harder to enforce when the model owns the full pipeline.</p>
+
+<p>The <code class="language-plaintext highlighter-rouge">anthropic</code> client is lazy-initialized so the import is never triggered for users running only the rule-based engine, preserving the core’s zero-dependency guarantee.</p>
+
+<hr />
+
+<h2 id="the-system-prompt">The System Prompt</h2>
+
+<p>The system prompt is a module-level constant in <code class="language-plaintext highlighter-rouge">llm_synthesizer.py</code> so it is easy to <code class="language-plaintext highlighter-rouge">grep</code>, version-control, and audit without reading the class.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">SYSTEM_PROMPT</span> <span class="o">=</span> <span class="s">"""</span><span class="se">\
+</span><span class="s">You are a biomedical decision-support assistant integrated into a Retrieval-</span><span class="se">\
+</span><span class="s">Augmented Generation (RAG) system called BioRAG.
+
+## Your task
+Answer the researcher's question using ONLY the numbered evidence excerpts </span><span class="se">\
+</span><span class="s">provided in the user message.
+
+## Strict grounding rules
+1. Every factual claim in your answer MUST be traceable to at least one of </span><span class="se">\
+</span><span class="s">the supplied excerpts.  Cite sources inline as [N] where N is the excerpt number.
+2. Do NOT use knowledge from your training data.  If the excerpts do not </span><span class="se">\
+</span><span class="s">contain sufficient information, say:
+   "The indexed corpus does not contain sufficient evidence to answer this </span><span class="se">\
+</span><span class="s">question.  Consider ingesting additional papers on this topic."
+3. If excerpts contradict each other, acknowledge the contradiction explicitly
+and cite both sides.
+4. Do not speculate, extrapolate, or infer beyond what the text states.
+
+## Output format
+Write 2–4 concise paragraphs of plain prose (no markdown headers, no bullet </span><span class="se">\
+</span><span class="s">lists).  Begin with a direct answer to the question, then elaborate with </span><span class="se">\
+</span><span class="s">supporting detail and citations.  End with a brief sentence noting any </span><span class="se">\
+</span><span class="s">important limitations visible in the evidence.
+
+## Evidence quality legend
+- DIRECT — explicit statistical results or clinical findings relevant to the query.
+- INDIRECT — topically related but does not directly confirm the query.
+- CONTRADICTORY — contains language suggesting refutation or failure.
+"""</span>
+</code></pre></div></div>
+
+<h3 id="why-training-knowledge-is-forbidden">Why training knowledge is forbidden</h3>
+
+<p>An LLM trained on biomedical literature knows a great deal about Alzheimer’s disease and pTau217. That knowledge is often correct. The problem is that it is not traceable. “pTau217 has an AUC of 0.94” means something different if it comes from a 2024 validation cohort of 800 patients than from a 2019 pilot of 40. The cohort characteristics and replication status are not knowable from a claim that originates in parametric memory.</p>
+
+<h3 id="why-rule-4-exists">Why rule 4 exists</h3>
+
+<p>Rule 4 — “Do not speculate, extrapolate, or infer beyond what the text states” — was added after a failure case in development.</p>
+
+<p>The query was <em>“What is the diagnostic performance of plasma pTau217 for Alzheimer’s disease?”</em>. The first three paragraphs were correctly grounded: AUC values cited from [1] and [2], the contradictory replication finding from [3] acknowledged, community-based sample limitations noted. Then the model added:</p>
+
+<blockquote>
+  <p><em>“Given the trajectory of plasma biomarker development and declining cost of mass spectrometry platforms, pTau217-based testing is likely to become part of routine clinical practice within the next decade.”</em></p>
+</blockquote>
+
+<p>No excerpt said that. The sentence was plausible and a knowledgeable reader might have agreed with it. Which is exactly what makes it dangerous. It was not marked as speculative. Detection was straightforward: <code class="language-plaintext highlighter-rouge">engine.synthesizer.last_prompt["user"]</code> showed the full excerpt set and none contained a forward-looking clinical practice claim.</p>
+
+<p>The fix was rule 4 plus a phrasing change in the output format instruction. The original read “elaborate with supporting detail”; the revision reads “elaborate with supporting detail <em>and citations</em>”, ensuring elaboration cannot license detail-addition without a citation anchor.</p>
+
+<hr />
+
+<h2 id="the-user-message">The User Message</h2>
+
+<p><code class="language-plaintext highlighter-rouge">_build_user_message()</code> produces the exact string that appears in the <code class="language-plaintext highlighter-rouge">messages</code> array:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">e</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">evidence</span><span class="p">,</span> <span class="mi">1</span><span class="p">):</span>
+    <span class="n">support_label</span> <span class="o">=</span> <span class="n">e</span><span class="p">.</span><span class="n">support_type</span><span class="p">.</span><span class="n">upper</span><span class="p">()</span>
+    <span class="n">excerpt</span> <span class="o">=</span> <span class="n">TextProcessor</span><span class="p">.</span><span class="n">truncate_at_sentence</span><span class="p">(</span><span class="n">e</span><span class="p">.</span><span class="n">excerpt</span><span class="p">,</span> <span class="mi">500</span><span class="p">)</span>
+    <span class="n">lines</span><span class="p">.</span><span class="n">append</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s">"</span><span class="se">\n</span><span class="s">[</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s">] **</span><span class="si">{</span><span class="n">e</span><span class="p">.</span><span class="n">doc_title</span><span class="si">}</span><span class="s">** | Section: </span><span class="si">{</span><span class="n">e</span><span class="p">.</span><span class="n">section</span><span class="si">}</span><span class="s"> | "</span>
+        <span class="sa">f</span><span class="s">"Relevance: </span><span class="si">{</span><span class="n">e</span><span class="p">.</span><span class="n">relevance_score</span><span class="si">:</span><span class="p">.</span><span class="mi">0</span><span class="o">%</span><span class="si">}</span><span class="s"> | Type: </span><span class="si">{</span><span class="n">support_label</span><span class="si">}</span><span class="se">\n</span><span class="s">"</span>
+        <span class="sa">f</span><span class="s">"Excerpt: </span><span class="si">{</span><span class="n">excerpt</span><span class="si">}</span><span class="s">"</span>
+    <span class="p">)</span>
+</code></pre></div></div>
+
+<p>Three things in the excerpt header carry signal.</p>
+
+<p><strong>Support type labels.</strong> Each header includes <code class="language-plaintext highlighter-rouge">DIRECT</code>, <code class="language-plaintext highlighter-rouge">INDIRECT</code>, or <code class="language-plaintext highlighter-rouge">CONTRADICTORY</code>. The model already knows what these mean from the system prompt, so it knows before reading whether it is about to encounter a primary finding or a refutation — and can frame it accordingly in prose.</p>
+
+<p><strong>Relevance percentages.</strong> The reranker’s score is passed through to the model. An excerpt at 64% should not be weighted the same as one at 100%. Providing the percentage means the model can structure its answer to lead with the strongest evidence.</p>
+
+<p><strong>Gap list in the user message.</strong> Gaps from <code class="language-plaintext highlighter-rouge">KnowledgeGapDetector</code> are listed in a “Known knowledge gaps” section. This prevents the model from treating absence of evidence as evidence of absence. If the gap list says “quantitative data not found”, the model knows the corpus lacked the statistics, not that the statistics do not exist. It also makes the limitations sentence at the end of the answer specific rather than generic boilerplate.</p>
+
+<p>The grounding instruction is repeated at the end of the user message (“Using ONLY the excerpts above…”) as a recency anchor just before generation.</p>
+
+<hr />
+
+<h2 id="prompt-caching-and-temperature">Prompt Caching and Temperature</h2>
+
+<p>The system prompt is passed with <code class="language-plaintext highlighter-rouge">"cache_control": {"type": "ephemeral"}</code>. The cache TTL is 5 minutes. For a decision-support session where a clinician iterates through related queries, refining an initial question and following up on a gap — the system prompt tokens are processed once and cached for all subsequent queries in the session. At current pricing this reduces the effective per-query cost of the synthesis step by roughly 90% for those cached tokens.</p>
+
+<p>Temperature is 0. Evidence synthesis in a clinical context has no use for sampling variation. The model should produce the same answer from the same evidence every time.</p>
+
+<hr />
+
+<h2 id="fallback-on-api-failure">Fallback on API Failure</h2>
+
+<p>If the API call fails, <code class="language-plaintext highlighter-rouge">ClaudeSynthesizer</code> falls back to the parent’s rule-based <code class="language-plaintext highlighter-rouge">_build_answer()</code> and records it in the reasoning chain: <code class="language-plaintext highlighter-rouge">"LLM synthesis failed (...); used rule-based fallback."</code> The confidence score and gap list are unaffected. A decision-support system that becomes unusable when an external API is temporarily unavailable is not suitable for real use.</p>
+
+<hr />
+
+<h2 id="the-fastapi-server">The FastAPI Server</h2>
+
+<p><code class="language-plaintext highlighter-rouge">server.py</code> exposes five endpoints:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Method</th>
+      <th>Path</th>
+      <th>Purpose</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">GET</code></td>
+      <td><code class="language-plaintext highlighter-rouge">/health</code></td>
+      <td>Corpus stats; confirms engine loaded</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">POST</code></td>
+      <td><code class="language-plaintext highlighter-rouge">/query</code></td>
+      <td>Full RAG pipeline; returns <code class="language-plaintext highlighter-rouge">QueryResponse</code></td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">POST</code></td>
+      <td><code class="language-plaintext highlighter-rouge">/ingest</code></td>
+      <td>Fetch PubMed/PMC papers and index them</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">POST</code></td>
+      <td><code class="language-plaintext highlighter-rouge">/documents</code></td>
+      <td>Add a single document by text</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">GET</code></td>
+      <td><code class="language-plaintext highlighter-rouge">/corpus</code></td>
+      <td>Document/chunk/term count statistics</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The query response includes <code class="language-plaintext highlighter-rouge">latency_ms</code> in the body so clients can detect when retrieval slows as the corpus grows. This a signal to tune <code class="language-plaintext highlighter-rouge">retrieval_top_k</code> or chunk size.</p>
+
+<p>The <code class="language-plaintext highlighter-rouge">/ingest</code> endpoint is synchronous. It blocks until NCBI returns all results, which is fine for <code class="language-plaintext highlighter-rouge">max_results</code> values of 10–20 but will time out for large requests. The right fix is background ingestion with a polling endpoint which is exactly what the MCP server implements.</p>
+
+<p>Every request and response type is a Pydantic model. <code class="language-plaintext highlighter-rouge">QueryResponse</code> mirrors <code class="language-plaintext highlighter-rouge">DecisionOutput</code> with the addition of <code class="language-plaintext highlighter-rouge">latency_ms</code>. This is a serialization contract: it prevents internal dataclass fields like <code class="language-plaintext highlighter-rouge">frozenset</code> from leaking into the HTTP response.</p>
+
+<hr />
+
+<h2 id="the-mcp-server">The MCP Server</h2>
+
+<p><code class="language-plaintext highlighter-rouge">mcp_server.py</code> exposes four tools callable directly inside a Claude Code session:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Tool</th>
+      <th>What it does</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">query(question)</code></td>
+      <td>Full RAG pipeline — answer, confidence, evidence, gaps, follow-ups</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">ingest(pubmed_query, max_results)</code></td>
+      <td>Starts a background ingestion job; returns <code class="language-plaintext highlighter-rouge">job_id</code> immediately</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">ingest_status(job_id)</code></td>
+      <td>Polls the job; includes <code class="language-plaintext highlighter-rouge">corpus_stats</code> when done</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">corpus_stats()</code></td>
+      <td>Document/chunk/term counts</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="background-ingest">Background ingest</h3>
+
+<p>MCP tool calls run inside a conversational context. A tool that blocks for 30 seconds on NCBI responses would time out the transport. The solution is a job registry: <code class="language-plaintext highlighter-rouge">ingest()</code> starts a daemon thread and returns a <code class="language-plaintext highlighter-rouge">job_id</code> immediately. <code class="language-plaintext highlighter-rouge">ingest_status()</code> polls it.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="o">@</span><span class="n">mcp</span><span class="p">.</span><span class="n">tool</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">ingest</span><span class="p">(</span><span class="n">pubmed_query</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">max_results</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">10</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+    <span class="n">job_id</span> <span class="o">=</span> <span class="n">uuid</span><span class="p">.</span><span class="n">uuid4</span><span class="p">().</span><span class="nb">hex</span><span class="p">[:</span><span class="mi">8</span><span class="p">]</span>
+    <span class="n">_jobs</span><span class="p">[</span><span class="n">job_id</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s">"status"</span><span class="p">:</span> <span class="s">"running"</span><span class="p">,</span> <span class="p">...}</span>
+    <span class="n">threading</span><span class="p">.</span><span class="n">Thread</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">_ingest_job</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="n">job_id</span><span class="p">,</span> <span class="n">pubmed_query</span><span class="p">,</span> <span class="n">max_results</span><span class="p">),</span>
+                     <span class="n">daemon</span><span class="o">=</span><span class="bp">True</span><span class="p">).</span><span class="n">start</span><span class="p">()</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s">"job_id"</span><span class="p">:</span> <span class="n">job_id</span><span class="p">,</span> <span class="s">"status"</span><span class="p">:</span> <span class="s">"running"</span><span class="p">,</span> <span class="s">"message"</span><span class="p">:</span> <span class="s">"..."</span><span class="p">}</span>
+</code></pre></div></div>
+
+<p>The polling pattern in a Claude Code session looks like:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Use biorag to ingest 20 papers on CRISPR cancer therapy
+→ { "job_id": "a3f9c1d2", "status": "running" }
+
+Use biorag ingest_status for a3f9c1d2
+→ { "status": "done", "indexed": 18, "corpus_stats": { ... } }
+</code></pre></div></div>
+
+<p><code class="language-plaintext highlighter-rouge">BioRAGEngine</code> carries an internal <code class="language-plaintext highlighter-rouge">threading.Lock</code> that serialises concurrent calls, so an ingest job running alongside a query is safe without additional locking at the server layer. A query during active ingestion sees the index in whatever state the lock was last released.</p>
+
+<h3 id="registration">Registration</h3>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>pip <span class="nb">install</span> <span class="s2">"mcp[cli]"</span>
+claude mcp add biorag python /absolute/path/to/mcp_server.py
+claude mcp list   <span class="c"># → biorag: python ... ✓ Connected</span>
+</code></pre></div></div>
+
+<p>The server starts as a child process over <code class="language-plaintext highlighter-rouge">stdio</code> transport. MCP tools are injected at session startup — restart Claude Code after first registration.</p>
+
+<h3 id="using-the-tools">Using the tools</h3>
+
+<p>Once registered, the tools are available in any Claude Code session by name. You address them in natural language and Claude Code calls them directly — no Python required.</p>
+
+<p><strong>Query the indexed corpus:</strong></p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Use biorag to query: what plasma biomarkers predict Alzheimer's disease?
+</code></pre></div></div>
+
+<p>Claude Code calls <code class="language-plaintext highlighter-rouge">query()</code> and receives the full <code class="language-plaintext highlighter-rouge">DecisionOutput</code> — answer text, confidence label, evidence nodes with relevance scores, knowledge gaps, and follow-up questions. Each follow-up can be sent as the next query against the same live index.</p>
+
+<p><strong>Ingest papers from PubMed:</strong></p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Use biorag to ingest 15 papers on plasma pTau217 Alzheimer's biomarkers
+</code></pre></div></div>
+
+<p>This returns a <code class="language-plaintext highlighter-rouge">job_id</code> immediately. Poll for completion:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Use biorag ingest_status to check job a3f9c1d2
+</code></pre></div></div>
+
+<p>When status is <code class="language-plaintext highlighter-rouge">"done"</code>, the response includes updated corpus stats — document count, chunk count, full-text vs abstract breakdown — confirming the papers landed before you query.</p>
+
+<p><strong>Check what is indexed:</strong></p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Use biorag corpus_stats
+</code></pre></div></div>
+
+<p>Useful before a query session to confirm the corpus covers the topic. If <code class="language-plaintext highlighter-rouge">full_text_count</code> is low relative to <code class="language-plaintext highlighter-rouge">doc_count</code>, most documents are abstract-only — a signal that retrieval precision may be limited by shallow text.</p>
+
+<p><strong>A typical session:</strong></p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>1. corpus_stats          → 8 docs, 312 chunks, 4 full-text
+2. ingest 20 papers on "plasma biomarkers Alzheimer diagnosis"
+3. ingest_status &lt;id&gt;    → done, 18 indexed, 312 → 1047 chunks
+4. query: what AUC values have been reported for pTau217?
+5. query: are there contradictory findings on plasma NfL?
+6. query: which biomarkers have been validated in community cohorts?
+</code></pre></div></div>
+
+<p>Papers ingested in step 2 are available to all subsequent queries without re-ingestion. Each query returns an independent <code class="language-plaintext highlighter-rouge">DecisionOutput</code> with its own confidence score and gap list.</p>
+
+<hr />
+
+<h2 id="what-the-llm-does-and-does-not-own">What the LLM Does and Does Not Own</h2>
+
+<p>A reasonable question: why not let the LLM run the whole pipeline? It knows biomedical text.</p>
+
+<p>The structured pipeline does things the LLM cannot do reliably. BM25 scoring is exact arithmetic over a data structure: a token either matches or it does not. The confidence formula produces a checkable number: <code class="language-plaintext highlighter-rouge">0.3 + 0.4 + 0.14 − 0.05 = 0.81</code> is verifiable by a human reviewer; “High confidence” produced by an LLM is not. The gap detector fires on structural properties of the evidence set that do not require reading comprehension, and its false-positive rate is knowable from the pattern definitions.</p>
+
+<p>What the LLM does well — and what the structured components do poorly — is <em>writing</em>. <code class="language-plaintext highlighter-rouge">_build_answer()</code> concatenates excerpts. <code class="language-plaintext highlighter-rouge">ClaudeSynthesizer</code> compares them, qualifies them, and acknowledges contradictions in context. That is the right division of labour: deterministic structure where auditability matters, natural language where readability matters.</p>
+
+<hr />
+
+<h2 id="coming-up-in-post-5">Coming Up in Post 5</h2>
+
+<p>Post 5 covers the retrieval evaluation harness — the <code class="language-plaintext highlighter-rouge">evals/</code> directory that measures BM25 and reranker quality independently using MRR and NDCG@K. We will look at the 16-query ground truth set, how max-pooling aggregates chunk-level scores to document-level, and what the Δ column in the eval output actually tells you — when a negative NDCG delta is a reranker bug versus an expected trade-off from tightening <code class="language-plaintext highlighter-rouge">rerank_top_k</code>. We will also look at what retrieval evals cannot measure and what a full answer-quality evaluation would require.</p>
+
+<hr />
+
+<p><em>BioRAG is built in pure Python stdlib. The core engine — BM25 index, reranker, evidence classifier, synthesizer — has zero external dependencies. PubMed ingestion requires only <code class="language-plaintext highlighter-rouge">requests</code>. LLM answer synthesis requires only <code class="language-plaintext highlighter-rouge">anthropic</code>.</em></p>
+
+  </div>
+
+</article>
+
+      </div>
+    </main><footer class="site-footer h-card">
+  <data class="u-url" href="/"></data>
+
+  <div class="wrapper">
+    <div class="footer-col-wrapper">
+      <div class="footer-col footer-col-1">
+        <ul class="contact-list"></ul>
+      </div>
+
+      <div class="footer-col footer-col-2"><ul class="social-media-list"></ul>
+</div>
+
+      <div class="footer-col footer-col-3">
+        <p>Research to production mindset</p>
+      </div>
+    </div>
+  </div>
+
+</footer>
+</body>
+
+</html>
