@@ -8,7 +8,7 @@ date: 2026-06-01
 
 # Building BioRAG: A Decision-Support RAG System for Biomedical Literature
 
-**Part 5 of 5 — Evaluation, MRR, NDCG, and Lessons from Building Retrieval Evals**
+**Part 5 — Evaluation, MRR, NDCG, and Lessons from Building Retrieval Evals**
 
 ---
 
