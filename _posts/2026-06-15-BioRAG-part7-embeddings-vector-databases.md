@@ -100,7 +100,7 @@ When BioRAG compares two embeddings, it uses **cosine similarity**. It is a numb
 
 The key idea is that cosine measures the **angle** between two arrows drawn from the origin to each point. Two arrows pointing the same way are "similar" no matter how long they are. The figure below shows it on both sides: the keyword blind spot on the left (same meaning, zero shared words), and on the right the same four medical words drawn as vectors from the origin — `alzheimer` and `memory` almost overlap (a tiny angle), while `cardiac` points off in a very different direction (a wide angle):
 
-![From Spelling to Meaning: Embeddings & Cosine Similarity](blog/linkedin_post_7a_diagram.png)
+![From Spelling to Meaning: Embeddings & Cosine Similarity](/blog/linkedin_post_7a_diagram.png)
 
 `alzheimer` and `memory` point almost the same direction, so the angle between them is tiny and the cosine is near 1. `alzheimer` and `cardiac` point in nearly opposite corners of the space, so the angle is wide and the cosine is low — even though both arrows are the same length. Working through all three comparisons against `alzheimer`:
 
@@ -217,7 +217,7 @@ When one is weak, the other tends to be strong. So BioRAG sends the query to bot
 
 Putting the whole back half of this post together — picking a domain-aware model, storing its vectors in a database that embeds once, and running both searches side by side:
 
-![Choosing an Embedding Model + Where Vectors Live](blog/linkedin_post_7b_diagram.png)
+![Choosing an Embedding Model + Where Vectors Live](/blog/linkedin_post_7b_diagram.png)
 
 Crucially, the dense retriever is **optional and bolted on**. With no embedding model configured, BioRAG behaves uses pure BM25, zero external dependencies. Add a `dense_retriever` and the meaning-based search switches on. 
 
