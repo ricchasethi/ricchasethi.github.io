@@ -1,4 +1,1343 @@
-<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="3.10.0">Jekyll</generator><link href="/feed.xml" rel="self" type="application/atom+xml" /><link href="/" rel="alternate" type="text/html" /><updated>2026-05-27T13:14:42+10:00</updated><id>/feed.xml</id><title type="html">Research to Production</title><subtitle>Research to production mindset</subtitle><entry><title type="html">BioRAG: Part 4</title><link href="/2026/05/27/BioRAG-part4-llm-synthesis-server-mcp.html" rel="alternate" type="text/html" title="BioRAG: Part 4" /><published>2026-05-27T00:00:00+10:00</published><updated>2026-05-27T00:00:00+10:00</updated><id>/2026/05/27/BioRAG-part4-llm-synthesis-server-mcp</id><content type="html" xml:base="/2026/05/27/BioRAG-part4-llm-synthesis-server-mcp.html"><![CDATA[<h1 id="building-biorag-a-decision-support-rag-system-for-biomedical-literature">Building BioRAG: A Decision-Support RAG System for Biomedical Literature</h1>
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="3.10.0">Jekyll</generator><link href="/feed.xml" rel="self" type="application/atom+xml" /><link href="/" rel="alternate" type="text/html" /><updated>2026-06-15T12:48:32+10:00</updated><id>/feed.xml</id><title type="html">Research to Production</title><subtitle>Research to production mindset</subtitle><entry><title type="html">BioRAG: Part 7</title><link href="/2026/06/15/BioRAG-part7-embeddings-vector-databases.html" rel="alternate" type="text/html" title="BioRAG: Part 7" /><published>2026-06-15T00:00:00+10:00</published><updated>2026-06-15T00:00:00+10:00</updated><id>/2026/06/15/BioRAG-part7-embeddings-vector-databases</id><content type="html" xml:base="/2026/06/15/BioRAG-part7-embeddings-vector-databases.html"><![CDATA[<h1 id="building-biorag-a-decision-support-rag-system-for-biomedical-literature">Building BioRAG: A Decision-Support RAG System for Biomedical Literature</h1>
+
+<p><strong>Part 7 — From Keyword Matching to Meaning: Embeddings and Vector Databases</strong></p>
+
+<hr />
+
+<p>For the first six parts of this series, BioRAG found documents using a single technique: <strong>keyword matching</strong>. It worked well as seen from evals in Part 5. The right document landed at rank 1 most of the time.</p>
+
+<p>But keyword matching has a blind spot which does matter in medicine. This post is about what the blind spot is, the technology that fixes it i.e. <strong>embeddings</strong> and <strong>vector databases</strong> and how they were added to BioRAG without throwing away the keyword search that already worked.</p>
+
+<p>If you have never thought about how a search engine decides what is “relevant”, this post is written for you. No prior knowledge of retrieval is assumed.</p>
+
+<hr />
+
+<h2 id="the-story-so-far-how-bm25-finds-documents">The Story So Far: How BM25 Finds Documents</h2>
+
+<p>When you type a question into BioRAG, the first thing it does is find candidate documents from the corpus. Until now, it did this with an algorithm called <strong>BM25</strong>.</p>
+
+<p>BM25 is a very sophisticated word-counter. When you ask <em>“What plasma biomarkers predict Alzheimer’s disease?”</em>, BM25 breaks your question into words/tokens like <code class="language-plaintext highlighter-rouge">plasma</code>, <code class="language-plaintext highlighter-rouge">biomarkers</code>, <code class="language-plaintext highlighter-rouge">predict</code>, <code class="language-plaintext highlighter-rouge">alzheimer</code>, <code class="language-plaintext highlighter-rouge">disease</code> and then scans every document for those exact words/tokens. A document that contains “alzheimer” five times and “biomarker” three times scores higher than one that mentions them once.</p>
+
+<p>It is a little smarter than raw counting. BM25 adds two refinements:</p>
+
+<ul>
+  <li><strong>Rare words count more.</strong> The word “the” appears everywhere, so matching it tells you nothing. The word “neurofilament” appears rarely, so matching it is a strong signal. BM25 down-weights common words and up-weights rare ones.</li>
+  <li><strong>Repetition has diminishing returns.</strong> The tenth mention of “amyloid” adds less than the second. BM25 saturates so one keyword-stuffed document cannot dominate.</li>
+</ul>
+
+<p>For biomedical text, this is genuinely good. Medicine is full of precise terms like gene names (<code class="language-plaintext highlighter-rouge">APOE4</code>), drug names (<code class="language-plaintext highlighter-rouge">lecanemab</code>), protein markers (<code class="language-plaintext highlighter-rouge">p-tau217</code>) etc. When a clinician searches for <code class="language-plaintext highlighter-rouge">APOE4</code>, they mean <em>that exact gene</em> and BM25’s exact-match behavior is exactly right. This is why BM25 was the default and why the core engine needs zero external dependencies to run it.</p>
+
+<hr />
+
+<h2 id="the-blind-spot-words-that-mean-the-same-thing">The Blind Spot: Words That Mean the Same Thing</h2>
+
+<p>Here is the problem. BM25 matches <strong>words</strong> and not their <strong>meaning</strong>. It has no idea that two different phrases can describe the same thing.</p>
+
+<p>Consider these two phrases:</p>
+
+<ul>
+  <li><em>“plasma biomarkers”</em></li>
+  <li><em>“blood-based protein markers”</em></li>
+</ul>
+
+<p>To a doctor, these are nearly the same concept. But to BM25, they share <strong>zero words</strong>. If your query says “plasma biomarkers” and the most relevant paper in the corpus happens to phrase it as “blood-based protein markers,” BM25 may rank that paper far down the list or even miss it entirely.</p>
+
+<p>This happens constantly in scientific writing because authors deliberately vary their language:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Your query says</th>
+      <th>The paper says</th>
+      <th>Words shared</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>heart attack</td>
+      <td>myocardial infarction</td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td>brain scan</td>
+      <td>neuroimaging</td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td>memory loss</td>
+      <td>cognitive decline</td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td>blood sugar</td>
+      <td>plasma glucose</td>
+      <td>0 (well, “plasma”…)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>A keyword search treats every row above as a complete miss. That is the blind spot: <strong>BM25 cannot retrieve a document whose words it does not literally share with the query, no matter how relevant the document is.</strong></p>
+
+<p>To close this gap, we need to search by <em>meaning</em> instead of by <em>spelling</em>. That is what embeddings do.</p>
+
+<hr />
+
+<h2 id="what-is-an-embedding">What Is an Embedding?</h2>
+
+<p>An <strong>embedding</strong> is a way of turning a piece of text into a list of numbers, a coordinate, such that texts with similar meanings get similar coordinates.</p>
+
+<p>Let me show an example.</p>
+
+<h3 id="a-toy-example-you-can-picture">A toy example you can picture</h3>
+
+<p>Imagine we want to place words on a 2-dimensional map. We get to invent two axes:</p>
+
+<ul>
+  <li><strong>Axis 1 (left ↔ right):</strong> how much the word relates to <em>the heart</em>.</li>
+  <li><strong>Axis 2 (down ↔ up):</strong> how much the word relates to <em>the brain</em>.</li>
+</ul>
+
+<p>Now we place some medical words on this map by giving each one two numbers — <code class="language-plaintext highlighter-rouge">[heart-score, brain-score]</code>:</p>
+
+<ul>
+  <li><code class="language-plaintext highlighter-rouge">alzheimer</code> → <code class="language-plaintext highlighter-rouge">[0.1, 0.9]</code> — barely about the heart, very much about the brain.</li>
+  <li><code class="language-plaintext highlighter-rouge">memory</code> → <code class="language-plaintext highlighter-rouge">[0.2, 0.8]</code> — also brain-ish. <strong>Notice it sits close to <code class="language-plaintext highlighter-rouge">alzheimer</code>.</strong></li>
+  <li><code class="language-plaintext highlighter-rouge">cardiac</code> → <code class="language-plaintext highlighter-rouge">[0.9, 0.1]</code> — very heart, not brain. <strong>Far from <code class="language-plaintext highlighter-rouge">alzheimer</code>.</strong></li>
+  <li><code class="language-plaintext highlighter-rouge">stroke</code> → <code class="language-plaintext highlighter-rouge">[0.6, 0.6]</code> — it involves both, so it sits in the middle.</li>
+</ul>
+
+<p>Now the magic: to find words related to <code class="language-plaintext highlighter-rouge">alzheimer</code>, we do not look for the <em>letters</em> a-l-z-h… We look for the <em>nearest points on the map</em>. <code class="language-plaintext highlighter-rouge">memory</code> is close so it is related, <strong>even though it shares no letters with “alzheimer.”</strong> <code class="language-plaintext highlighter-rouge">cardiac</code> is far, so it is unrelated.</p>
+
+<p>That is an embedding. Each word (or sentence, or paragraph) becomes a point in space and <strong>distance in that space means difference in meaning</strong>. Close together = similar meaning. Far apart = different meaning.</p>
+
+<h3 id="from-2-dimensions-to-768">From 2 dimensions to 768</h3>
+
+<p>My toy map had 2 axes that I picked by hand. Real embedding models do two things differently:</p>
+
+<ol>
+  <li><strong>They use many more dimensions</strong> — hundreds or thousands. The model BioRAG produces <strong>768 numbers</strong> per text. You cannot picture 768-dimensional space, but the math of “which points are close” works exactly the same.</li>
+  <li><strong>Nobody hand-picks the axes.</strong> The model <em>learns</em> them by reading enormous amounts of text. After training, some dimensions end up loosely corresponding to concepts like “is this about oncology,” “is this a statistical result,” “is this past tense”.But, mostly they are abstract directions the model found useful.</li>
+</ol>
+
+<p>The payoff: when a model has read millions of biomedical sentences, it learns that “plasma biomarkers” and “blood-based protein markers” appear in the same contexts. So it places them at nearly the same coordinates. Search by nearness and you find one when you ask for the other. <strong>The blind spot is closed.</strong></p>
+
+<h3 id="how-nearness-is-actually-measured">How “nearness” is actually measured</h3>
+
+<p>When BioRAG compares two embeddings, it uses <strong>cosine similarity</strong>. It is a number from -1 to 1 that measures whether two coordinate-arrows point in the same direction. 1 means “same meaning,” 0 means “unrelated,” negative means “opposite.” You do not need the formula; just hold onto the intuition: <em>higher cosine = closer in meaning.</em></p>
+
+<p>The key idea is that cosine measures the <strong>angle</strong> between two arrows drawn from the origin to each point. Two arrows pointing the same way are “similar” no matter how long they are. The figure below shows it on both sides: the keyword blind spot on the left (same meaning, zero shared words), and on the right the same four medical words drawn as vectors from the origin — <code class="language-plaintext highlighter-rouge">alzheimer</code> and <code class="language-plaintext highlighter-rouge">memory</code> almost overlap (a tiny angle), while <code class="language-plaintext highlighter-rouge">cardiac</code> points off in a very different direction (a wide angle):</p>
+
+<p><img src="blog/linkedin_post_7a_diagram.png" alt="From Spelling to Meaning: Embeddings &amp; Cosine Similarity" /></p>
+
+<p><code class="language-plaintext highlighter-rouge">alzheimer</code> and <code class="language-plaintext highlighter-rouge">memory</code> point almost the same direction, so the angle between them is tiny and the cosine is near 1. <code class="language-plaintext highlighter-rouge">alzheimer</code> and <code class="language-plaintext highlighter-rouge">cardiac</code> point in nearly opposite corners of the space, so the angle is wide and the cosine is low — even though both arrows are the same length. Working through all three comparisons against <code class="language-plaintext highlighter-rouge">alzheimer</code>:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Pair</th>
+      <th>Angle between arrows</th>
+      <th>Cosine similarity</th>
+      <th>Interpretation</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>alzheimer ↔ memory</td>
+      <td>≈ 8°</td>
+      <td><strong>0.99</strong></td>
+      <td>almost identical meaning</td>
+    </tr>
+    <tr>
+      <td>alzheimer ↔ stroke</td>
+      <td>≈ 39°</td>
+      <td><strong>0.78</strong></td>
+      <td>related (stroke touches the brain too)</td>
+    </tr>
+    <tr>
+      <td>alzheimer ↔ cardiac</td>
+      <td>≈ 77°</td>
+      <td><strong>0.22</strong></td>
+      <td>mostly unrelated</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>This is exactly the ranking a clinician would expect: <code class="language-plaintext highlighter-rouge">memory</code> closest to <code class="language-plaintext highlighter-rouge">alzheimer</code>, <code class="language-plaintext highlighter-rouge">cardiac</code> furthest and BioRAG gets it purely from the angles between embedding vectors.</p>
+
+<hr />
+
+<h2 id="choosing-an-embedding-model-for-biorag">Choosing an Embedding Model for BioRAG</h2>
+
+<p>Not all embedding models are equal, and for biomedical text the choice matters a lot. A model that learned its coordinates by reading news articles and Reddit will place medical terms clumsily, because it rarely saw them. A model that learned by reading PubMed will place them precisely.</p>
+
+<p>Every model below is free to download from the <a href="https://huggingface.co/">Hugging Face</a> hub and drops straight into BioRAG’s <code class="language-plaintext highlighter-rouge">EmbeddingModel(model_name=...)</code>. They fall into two families.</p>
+
+<p><strong>General-purpose retrievers</strong> — trained on broad web text, strong all-rounders, small and fast:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Model</th>
+      <th>Dim</th>
+      <th>Advantages</th>
+      <th>Disadvantages</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">all-MiniLM-L6-v2</code></td>
+      <td>384</td>
+      <td>Tiny (~80 MB), very fast, runs comfortably on CPU</td>
+      <td>Weakest on biomedical jargon; rare gene/drug terms placed loosely</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">BAAI/bge-small-en-v1.5</code></td>
+      <td>384</td>
+      <td>Lightweight, retrieval-tuned, available via <code class="language-plaintext highlighter-rouge">fastembed</code> (no <code class="language-plaintext highlighter-rouge">torch</code>)</td>
+      <td>General domain; needs a query-instruction prefix to perform its best</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">BAAI/bge-base-en-v1.5</code></td>
+      <td>768</td>
+      <td>Stronger general retrieval, same dim as the default</td>
+      <td>~3× larger than <code class="language-plaintext highlighter-rouge">bge-small</code>; still not biomedical</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">intfloat/e5-base-v2</code></td>
+      <td>768</td>
+      <td>Excellent general retrieval benchmarks</td>
+      <td>Requires <code class="language-plaintext highlighter-rouge">"query:"</code> / <code class="language-plaintext highlighter-rouge">"passage:"</code> prefixes or quality drops sharply</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">BAAI/bge-large-en-v1.5</code></td>
+      <td>1024</td>
+      <td>Top-tier general accuracy</td>
+      <td>Heavy and slow; GPU strongly recommended; bigger vectors to store</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>Biomedical specialists</strong> — trained on PubMed / clinical text that understand the vocabulary:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Model</th>
+      <th>Dim</th>
+      <th>Advantages</th>
+      <th>Disadvantages</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong><code class="language-plaintext highlighter-rouge">pritamdeka/S-PubMedBert-MS-MARCO</code></strong></td>
+      <td><strong>768</strong></td>
+      <td><strong>PubMed + Q&amp;A tuned; strong question→passage matching; the BioRAG default</strong></td>
+      <td><strong>~440 MB; pulls in <code class="language-plaintext highlighter-rouge">torch</code>; slower than MiniLM</strong></td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">NeuML/pubmedbert-base-embeddings</code></td>
+      <td>768</td>
+      <td>PubMedBERT packaged as a ready sentence-embedder; great on abstracts</td>
+      <td>Tuned for similarity, not specifically Q&amp;A retrieval</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">pritamdeka/S-BioBert-snli-multinli-stsb</code></td>
+      <td>768</td>
+      <td>BioBERT-based, solid biomedical sentence similarity</td>
+      <td>Older; trained on NLI/STS, not retrieval pairs</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">cambridgeltl/SapBERT-from-PubMedBERT-fulltext</code></td>
+      <td>768</td>
+      <td>Superb at entity/synonym matching (gene &amp; drug aliases)</td>
+      <td>Built for entity linking, not passage retrieval - weaker on full questions</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Two practical caveats that trip people up:</p>
+
+<ul>
+  <li><strong>Raw <code class="language-plaintext highlighter-rouge">BioBERT</code> / <code class="language-plaintext highlighter-rouge">PubMedBERT</code> / <code class="language-plaintext highlighter-rouge">ClinicalBERT</code> checkpoints are <em>not</em> embedding models.</strong> They are masked-language models. Without sentence-transformer fine-tuning they produce poor coordinates. Always pick a checkpoint that is explicitly packaged for embeddings (like the four above), not the base model.</li>
+  <li><strong>Switching to a model with a different dimension means re-embedding the whole corpus.</strong> BioRAG sizes its Qdrant collection to the model’s output dim (e.g. 768), so moving to a 384- or 1024-dim model requires a fresh collection. This means delete <code class="language-plaintext highlighter-rouge">./qdrant_data</code> and let it rebuild.</li>
+</ul>
+
+<p>BioRAG defaults to <strong><code class="language-plaintext highlighter-rouge">S-PubMedBert-MS-MARCO</code></strong> for two reasons that compound:</p>
+
+<ol>
+  <li><strong>It read the right material.</strong> It was trained on PubMed, so it has seen “p-tau217,” “amyloid-β,” and “neurofilament light chain” in their natural habitat. It knows they cluster near “Alzheimer’s” and not near “lung cancer.”</li>
+  <li><strong>It was tuned for question-answering.</strong> The “MS-MARCO” part means it was specifically trained to match <em>questions</em> to <em>relevant passages</em>. This is exactly what a search engine does. Many embedding models are trained to match sentences to similar sentences; this one was trained to match a question to its answer.</li>
+</ol>
+
+<h3 id="which-model-for-which-scenario">Which model for which scenario?</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Your situation</th>
+      <th>Pick</th>
+      <th>Why</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Default — best accuracy on PubMed abstracts</td>
+      <td><code class="language-plaintext highlighter-rouge">S-PubMedBert-MS-MARCO</code></td>
+      <td>Domain + question→passage tuning; what BioRAG ships with</td>
+    </tr>
+    <tr>
+      <td>CPU-only box, fast prototyping, demos</td>
+      <td><code class="language-plaintext highlighter-rouge">all-MiniLM-L6-v2</code></td>
+      <td>Smallest and fastest; accept some biomedical fuzziness</td>
+    </tr>
+    <tr>
+      <td>Want to avoid installing <code class="language-plaintext highlighter-rouge">torch</code></td>
+      <td><code class="language-plaintext highlighter-rouge">BAAI/bge-small-en-v1.5</code> via <code class="language-plaintext highlighter-rouge">fastembed</code></td>
+      <td>Runs without the heavy deep-learning stack</td>
+    </tr>
+    <tr>
+      <td>Queries hinge on gene/drug <strong>synonyms &amp; aliases</strong></td>
+      <td><code class="language-plaintext highlighter-rouge">SapBERT-from-PubMedBERT-fulltext</code></td>
+      <td>Purpose-built to map entity variants to the same point</td>
+    </tr>
+    <tr>
+      <td>GPU available, accuracy matters most</td>
+      <td><code class="language-plaintext highlighter-rouge">bge-large-en-v1.5</code> or a large biomedical model</td>
+      <td>Highest ceiling; the cost is speed and storage</td>
+    </tr>
+    <tr>
+      <td>Mixed biomedical + general/clinical corpus</td>
+      <td><code class="language-plaintext highlighter-rouge">NeuML/pubmedbert-base-embeddings</code></td>
+      <td>Strong on abstracts without over-specializing</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The model is swappable in one line of code, so a deployment that cannot afford the heavier PubMed model can drop to the lighter <code class="language-plaintext highlighter-rouge">bge-small</code> and trade some accuracy for speed:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">from</span> <span class="nn">hybrid_retrieval</span> <span class="kn">import</span> <span class="n">EmbeddingModel</span><span class="p">,</span> <span class="n">DenseRetriever</span>
+<span class="kn">from</span> <span class="nn">core.rag_engine</span> <span class="kn">import</span> <span class="n">BioRAGEngine</span>
+
+<span class="c1"># Default: the PubMed-tuned model
+</span><span class="n">engine</span> <span class="o">=</span> <span class="n">BioRAGEngine</span><span class="p">(</span><span class="n">dense_retriever</span><span class="o">=</span><span class="n">DenseRetriever</span><span class="p">(</span><span class="n">EmbeddingModel</span><span class="p">()))</span>
+
+<span class="c1"># Lighter alternative — same interface, smaller footprint
+</span><span class="n">dr</span> <span class="o">=</span> <span class="n">DenseRetriever</span><span class="p">(</span><span class="n">EmbeddingModel</span><span class="p">(</span><span class="s">"BAAI/bge-small-en-v1.5"</span><span class="p">))</span>
+<span class="n">engine</span> <span class="o">=</span> <span class="n">BioRAGEngine</span><span class="p">(</span><span class="n">dense_retriever</span><span class="o">=</span><span class="n">dr</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>A practical note on cost: the embedding model is a neural network that takes real time to run. Embedding the entire corpus once is the expensive step. We do not want to repeat it on every restart and this brings us to where those coordinates live.</p>
+
+<hr />
+
+<h2 id="where-embeddings-live-the-vector-database">Where Embeddings Live: The Vector Database</h2>
+
+<p>Once every chunk of every document has been turned into 768 numbers the problem is now its storage. When a query arrives, we turn <em>it</em> into 768 numbers too, and then we need to answer:</p>
+
+<blockquote>
+  <p><em>Of the thousands of stored coordinates, which ones are nearest to this query’s coordinate?</em></p>
+</blockquote>
+
+<p>Doing this by brute force i.e. comparing the query against every single stored vector works for a few hundred documents but becomes painfully slow as the corpus grows. We need a database built specifically for “find me the nearest points in high-dimensional space.” That is a <strong>vector database</strong>.</p>
+
+<p>BioRAG uses <strong>Qdrant</strong>. A vector database does three jobs an ordinary database cannot:</p>
+
+<ol>
+  <li><strong>It stores vectors efficiently</strong> : thousands of 768-number coordinates, each tagged with which chunk and document it came from.</li>
+  <li><strong>It searches by nearness quite fast.</strong> Instead of checking every vector, it uses clever indexing (think of it as a shortcut map of the space) to find the closest matches in a fraction of the time. This is called <em>approximate nearest neighbor</em> search. It is “approximate” because it trades a tiny, usually invisible amount of accuracy for a huge speed gain.</li>
+  <li><strong>It persists to disk.</strong> The expensive embedding step happens once. The coordinates are saved so a restart reloads them instantly instead of re-embedding the whole corpus.</li>
+</ol>
+
+<p>In BioRAG, the vector database can run three ways, depending on what you are doing:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Mode</th>
+      <th>When</th>
+      <th>Why</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>In-memory</td>
+      <td>Tests and evals</td>
+      <td>Fresh every run, nothing left on disk</td>
+    </tr>
+    <tr>
+      <td>File-based (default)</td>
+      <td>Development</td>
+      <td>Embeddings saved to <code class="language-plaintext highlighter-rouge">./qdrant_data</code>, survive restarts</td>
+    </tr>
+    <tr>
+      <td>Server</td>
+      <td>Production</td>
+      <td>A shared Qdrant service many processes can query</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>There is one subtlety worth calling out because it is the kind of thing that quietly wastes money. Every time BioRAG starts, it re-loads its sample corpus. Without a guard, it would re-embed every chunk on every launch and one has to pay for expensive neural-network cost over and over for text it has already processed. So before embedding, BioRAG asks Qdrant <em>“which of these chunks do you already have?”</em> and embeds only the genuinely new ones. The result: the corpus is embedded <strong>once</strong>, and only freshly ingested papers ever touch the model again.</p>
+
+<hr />
+
+<h2 id="bringing-it-together-two-searches-are-better-than-one">Bringing It Together: Two Searches Are Better Than One</h2>
+
+<p>Here is the design decision that ties the whole post together. I run <strong>both</strong> BM25 and embeddings.</p>
+
+<p>Why keep the old keyword search if embeddings understand meaning? Because the two techniques fail in <em>opposite</em> ways and that is exactly what you want from a pair:</p>
+
+<ul>
+  <li><strong>BM25 is precise but literal.</strong> It nails exact terms like <code class="language-plaintext highlighter-rouge">APOE4</code>, <code class="language-plaintext highlighter-rouge">lecanemab</code>,but misses paraphrases.</li>
+  <li><strong>Embeddings are flexible but fuzzy.</strong> They catch paraphrases like “memory loss” ≈ “cognitive decline”. However, it can occasionally drift toward something that is topically close yet wrong and they can fumble a rare gene ID that the keyword search would have matched perfectly.</li>
+</ul>
+
+<p>When one is weak, the other tends to be strong. So BioRAG sends the query to both, gets two ranked lists, and merges them. The merging method is called <strong>Reciprocal Rank Fusion</strong>. Now the all-important question of <em>whether running both actually produces better answers for Alzheimer’s queries</em> is the entire subject of the next post.</p>
+
+<p>Putting the whole back half of this post together — picking a domain-aware model, storing its vectors in a database that embeds once, and running both searches side by side:</p>
+
+<p><img src="blog/linkedin_post_7b_diagram.png" alt="Choosing an Embedding Model + Where Vectors Live" /></p>
+
+<p>Crucially, the dense retriever is <strong>optional and bolted on</strong>. With no embedding model configured, BioRAG behaves uses pure BM25, zero external dependencies. Add a <code class="language-plaintext highlighter-rouge">dense_retriever</code> and the meaning-based search switches on.</p>
+
+<hr />
+
+<h2 id="takeaways">Takeaways</h2>
+
+<ul>
+  <li><strong>Keyword search (BM25) matches spelling, not meaning.</strong> It is excellent for precise medical terms but blind to paraphrases and scientific writing is full of paraphrases.</li>
+  <li><strong>An embedding turns text into a coordinate</strong> in a high-dimensional space where <em>distance means difference in meaning</em>. Search becomes “find the nearest points” instead of “find the matching letters.” That is how “memory loss” can retrieve a paper about “cognitive decline.”</li>
+  <li><strong>The embedding model must know the domain.</strong> BioRAG uses <code class="language-plaintext highlighter-rouge">S-PubMedBert-MS-MARCO</code>, trained on PubMed and tuned for question-answering, because a model that has actually read biomedical literature places its terms far more accurately than a general-purpose one.</li>
+  <li><strong>A vector database (Qdrant) stores those coordinates and searches them fast,</strong> persisting to disk so the expensive embedding step happens only once.</li>
+  <li><strong>The winning move is not replacing BM25 but combining it with embeddings,</strong> because the two methods fail in opposite ways.</li>
+</ul>
+
+<p>In next blog I will discuss whether that combination actually <em>helps</em> on real Alzheimer’s queries or not.</p>
+
+<hr />
+
+<p><em>Code: <a href="https://github.com/ricchasethi/rag-biomedical-decision">github.com/ricchasethi/rag-biomedical-decision</a></em></p>]]></content><author><name></name></author><summary type="html"><![CDATA[Building BioRAG: A Decision-Support RAG System for Biomedical Literature]]></summary></entry><entry><title type="html">BioRAG: Part 6</title><link href="/2026/06/09/BioRAG-part6-llm-as-judge.html" rel="alternate" type="text/html" title="BioRAG: Part 6" /><published>2026-06-09T00:00:00+10:00</published><updated>2026-06-09T00:00:00+10:00</updated><id>/2026/06/09/BioRAG-part6-llm-as-judge</id><content type="html" xml:base="/2026/06/09/BioRAG-part6-llm-as-judge.html"><![CDATA[<h1 id="building-biorag-a-decision-support-rag-system-for-biomedical-literature">Building BioRAG: A Decision-Support RAG System for Biomedical Literature</h1>
+
+<p><strong>Part 6 — LLM-as-Judge: Why Good Retrieval Does Not Guarantee Good Answers</strong></p>
+
+<hr />
+
+<p>In Part 5 of this series, I measured retrieval quality using MRR and NDCG. The numbers looked good where 9 out of 10 queries hit MRR = 1.0, meaning the right document landed at rank 1 almost every time.</p>
+
+<p>So I assumed the system was working.</p>
+
+<p>Then I ran a second eval. This one scored the actual <em>answer text</em> and the picture changed completely. The average answer quality with the rule-based synthesizer was <strong>5.4 out of 10</strong> on an eight-dimension rubric. The retrieval was nearly perfect. The answers were not.</p>
+
+<p>This post is about that gap and how I used Claude as an automated judge to measure it.</p>
+
+<hr />
+
+<h2 id="why-retrieval-metrics-are-not-enough">Why Retrieval Metrics Are Not Enough</h2>
+
+<p>MRR and NDCG answer one question: <em>did the right document appear near the top of the ranked list?</em> They say nothing about what happened to that document after retrieval.</p>
+
+<p>In a RAG pipeline, the answer goes through at least two more stages after retrieval: reranking and synthesis. Both can lose information. The synthesizer might:</p>
+
+<ul>
+  <li>Quote a passage without drawing a directional conclusion from it</li>
+  <li>Name a disease area without naming the specific biomarker</li>
+  <li>Reproduce introductory sentences when the results section contains the actual answer</li>
+  <li>Surface the right document at rank 1 but pick a chunk from the discussion rather than results</li>
+</ul>
+
+<p>None of these failures show up in MRR or NDCG. You need a second eval that looks at the answer text itself.</p>
+
+<hr />
+
+<h2 id="designing-the-rubric">Designing the Rubric</h2>
+
+<p>The rubric for answer quality needs to be specific enough to catch real failures but generic enough to apply across different disease areas and query types.</p>
+
+<p>After testing several framings, I settled on eight dimensions:</p>
+
+<p><strong>1. Semantic Coverage (0–2)</strong>
+Does the answer address the specific biological phenomenon or just the topic area?</p>
+
+<ul>
+  <li>0 — Only the broad topic is covered (e.g. “biomarkers in Alzheimer’s disease”)</li>
+  <li>1 — The specific phenomenon is engaged but incomplete</li>
+  <li>2 — The same biological conclusion as the reference claim in ground truth</li>
+</ul>
+
+<p><strong>2. Entity Coverage (0–2)</strong>
+Are the specific genes, proteins, drugs, or markers named and in the right context?</p>
+
+<ul>
+  <li>0 — None of the expected entities appear</li>
+  <li>1 — Some entities named or all named but in an irrelevant context</li>
+  <li>2 — All key entities named in the correct context</li>
+</ul>
+
+<p><strong>3. Directional Agreement (0–1)</strong>
+Does the answer state the direction of effect explicitly?</p>
+
+<ul>
+  <li>0 — Direction absent, unclear, or contradicted</li>
+  <li>1 — Direction matches (e.g. “p-tau is elevated”, “uric acid is reduced”)</li>
+</ul>
+
+<p><strong>4. Quantitative Detail (0–1)</strong>
+Are magnitudes, effect sizes, or statistics consistent with the evidence?</p>
+
+<ul>
+  <li>0 — No quantitative information, or magnitudes inconsistent</li>
+  <li>1 — At least one magnitude consistent with the reference</li>
+</ul>
+
+<p><strong>5. Contextual Accuracy (0–1)</strong>
+Is the finding placed in the correct specific context?</p>
+
+<ul>
+  <li>0 — Wrong context, no context, or generic language only</li>
+  <li>1 — The claim-specific context is named explicitly (timepoint, subgroup, tissue)</li>
+</ul>
+
+<p><strong>6. Source Attribution (0–1)</strong>
+Are factual claims linked to inline numbered citations?</p>
+
+<ul>
+  <li>0 — Assertions made without inline citations, or no [N] references appear</li>
+  <li>1 — Every substantive factual claim has at least one inline citation ([1], [2], etc.)</li>
+</ul>
+
+<p><strong>7. Evidence Strength (0–1)</strong>
+Is the study design or evidence type explicitly named?</p>
+
+<ul>
+  <li>0 — Findings stated without characterising the evidence (no RCT, meta-analysis, cohort, in vitro, n= mentioned)</li>
+  <li>1 — At least one evidence type or study design explicitly named</li>
+</ul>
+
+<p><strong>8. Uncertainty Calibration (0–1)</strong>
+Does expressed confidence match evidence quality?</p>
+
+<ul>
+  <li>0 — Uniform assertiveness regardless of evidence strength, or over-hedges strong evidence</li>
+  <li>1 — Strong evidence → clear assertion; weak/preliminary → hedged language (“suggests”, “preliminary”)</li>
+</ul>
+
+<p><strong>Maximum: 10 points per query.</strong></p>
+
+<p>The last three dimensions are particularly important for clinical decision support. Source attribution ensures claims are auditable. Evidence strength tells clinicians how much weight to put on a finding. Uncertainty calibration prevents both false confidence and excessive hedging.</p>
+
+<p>The scoring intentionally rewards explicitness. An answer that <em>implies</em> a direction without stating it scores 0 on directional agreement. An answer that names a disease without naming the specific tissue or patient subgroup scores 0 on contextual accuracy.
+This strictness reveals the difference between answers that are technically correct and answers that are clinically useful.</p>
+
+<hr />
+
+<h2 id="implementing-the-judge">Implementing the Judge</h2>
+
+<p>The judge is a separate Claude call that receives:</p>
+
+<ol>
+  <li>The reference claim (what a correct answer should assert)</li>
+  <li>The expected entities, direction, and context</li>
+  <li>The actual answer text produced by the pipeline</li>
+</ol>
+
+<p>I used Claude’s <code class="language-plaintext highlighter-rouge">tool_use</code> API with a strict JSON schema for the rubric dimensions.
+This forces integer scores in the declared enum values.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">_JUDGE_TOOL</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s">"name"</span><span class="p">:</span> <span class="s">"score_answer"</span><span class="p">,</span>
+    <span class="s">"input_schema"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s">"type"</span><span class="p">:</span> <span class="s">"object"</span><span class="p">,</span>
+        <span class="s">"properties"</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s">"semantic_coverage"</span><span class="p">:</span>      <span class="p">{</span><span class="s">"type"</span><span class="p">:</span> <span class="s">"integer"</span><span class="p">,</span> <span class="s">"enum"</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">]},</span>
+            <span class="s">"entity_coverage"</span><span class="p">:</span>        <span class="p">{</span><span class="s">"type"</span><span class="p">:</span> <span class="s">"integer"</span><span class="p">,</span> <span class="s">"enum"</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">]},</span>
+            <span class="s">"directional_agreement"</span><span class="p">:</span>  <span class="p">{</span><span class="s">"type"</span><span class="p">:</span> <span class="s">"integer"</span><span class="p">,</span> <span class="s">"enum"</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">]},</span>
+            <span class="s">"quantitative_detail"</span><span class="p">:</span>    <span class="p">{</span><span class="s">"type"</span><span class="p">:</span> <span class="s">"integer"</span><span class="p">,</span> <span class="s">"enum"</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">]},</span>
+            <span class="s">"contextual_accuracy"</span><span class="p">:</span>    <span class="p">{</span><span class="s">"type"</span><span class="p">:</span> <span class="s">"integer"</span><span class="p">,</span> <span class="s">"enum"</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">]},</span>
+            <span class="s">"source_attribution"</span><span class="p">:</span>     <span class="p">{</span><span class="s">"type"</span><span class="p">:</span> <span class="s">"integer"</span><span class="p">,</span> <span class="s">"enum"</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">]},</span>
+            <span class="s">"evidence_strength"</span><span class="p">:</span>      <span class="p">{</span><span class="s">"type"</span><span class="p">:</span> <span class="s">"integer"</span><span class="p">,</span> <span class="s">"enum"</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">]},</span>
+            <span class="s">"uncertainty_calibration"</span><span class="p">:{</span><span class="s">"type"</span><span class="p">:</span> <span class="s">"integer"</span><span class="p">,</span> <span class="s">"enum"</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">]},</span>
+            <span class="s">"rationale"</span><span class="p">:</span>              <span class="p">{</span><span class="s">"type"</span><span class="p">:</span> <span class="s">"string"</span><span class="p">},</span>
+        <span class="p">},</span>
+        <span class="s">"required"</span><span class="p">:</span> <span class="p">[...]</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>The judge is deliberately isolated from the retrieval context. It only sees the answer text and the reference claim. This prevents the judge from giving credit for information that was retrieved but not expressed in the answer.</p>
+
+<p>The system prompt instructs the judge to score based strictly on what is explicitly
+stated and not implied:</p>
+
+<blockquote>
+  <p><em>Base your scores strictly on what the AI answer explicitly states — do not infer or 
+credit implied knowledge. An answer that implies a direction without stating it
+scores 0 on directional agreement.</em></p>
+</blockquote>
+
+<hr />
+
+<h2 id="reference-claims">Reference Claims</h2>
+
+<p>For each of the 10 eval queries, I wrote a reference claim specifying exactly what
+the answer should assert. Here is an example:</p>
+
+<p><strong>Query:</strong> Does resveratrol supplementation reduce uric acid levels in type 2 diabetes?</p>
+
+<p><strong>Reference claim:</strong> “Resveratrol supplementation significantly reduces serum uric acid in type 2 diabetes patients, with a pooled weighted mean difference of −0.42 mg/dL (P = 0.0005) and low heterogeneity (I² = 0%) across 12 RCTs with 636 participants.”</p>
+
+<p><strong>Expected entities:</strong> resveratrol, uric acid, WMD, RCT</p>
+
+<p><strong>Expected direction:</strong> decreased serum uric acid</p>
+
+<p><strong>Expected context:</strong> type 2 diabetes patients, meta-analysis of RCTs</p>
+
+<p>The reference claims are grounded in the actual corpus documents, so they reflect what is genuinely retrievable.</p>
+
+<hr />
+
+<h2 id="results-rule-based-vs-llm-synthesizer">Results: Rule-Based vs LLM Synthesizer</h2>
+
+<p>I ran the eval twice. Once with the default rule-based synthesizer (zero external
+dependencies, pure Python), and once with <code class="language-plaintext highlighter-rouge">ClaudeSynthesizer</code> (which calls
+<code class="language-plaintext highlighter-rouge">claude-sonnet-4-6</code> with the retrieved evidence formatted as numbered excerpts).</p>
+
+<h3 id="summary-scores">Summary scores</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Dimension</th>
+      <th>Rule-based</th>
+      <th>Claude</th>
+      <th>Δ</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Semantic Coverage</td>
+      <td>1.20 / 2</td>
+      <td>1.40 / 2</td>
+      <td>+0.20</td>
+    </tr>
+    <tr>
+      <td>Entity Coverage</td>
+      <td>1.10 / 2</td>
+      <td>1.70 / 2</td>
+      <td>+0.60</td>
+    </tr>
+    <tr>
+      <td>Directional Agreement</td>
+      <td>0.40 / 1</td>
+      <td><strong>0.80 / 1</strong></td>
+      <td><strong>+0.40</strong></td>
+    </tr>
+    <tr>
+      <td>Quantitative Detail</td>
+      <td>0.20 / 1</td>
+      <td>0.30 / 1</td>
+      <td>+0.10</td>
+    </tr>
+    <tr>
+      <td>Contextual Accuracy</td>
+      <td>0.80 / 1</td>
+      <td>1.00 / 1</td>
+      <td>+0.20</td>
+    </tr>
+    <tr>
+      <td>Source Attribution</td>
+      <td>0.90 / 1</td>
+      <td>1.00 / 1</td>
+      <td>+0.10</td>
+    </tr>
+    <tr>
+      <td>Evidence Strength</td>
+      <td>0.50 / 1</td>
+      <td>0.40 / 1</td>
+      <td>−0.10</td>
+    </tr>
+    <tr>
+      <td>Uncertainty Calibration</td>
+      <td>0.30 / 1</td>
+      <td><strong>0.90 / 1</strong></td>
+      <td><strong>+0.60</strong></td>
+    </tr>
+    <tr>
+      <td><strong>Total</strong></td>
+      <td><strong>5.40 / 10</strong></td>
+      <td><strong>7.50 / 10</strong></td>
+      <td><strong>+2.10</strong></td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="combined-retrieval--answer-quality-table">Combined retrieval + answer quality table</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Query</th>
+      <th>MRR</th>
+      <th>NDCG@3</th>
+      <th>Rule-based Tot</th>
+      <th>Claude Tot</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Q01 — Blood biomarkers for preclinical AD</td>
+      <td>1.00</td>
+      <td>1.00</td>
+      <td>5</td>
+      <td>5</td>
+    </tr>
+    <tr>
+      <td>Q02 — Plasma amyloid-beta accuracy</td>
+      <td>1.00</td>
+      <td>1.00</td>
+      <td>4</td>
+      <td>6</td>
+    </tr>
+    <tr>
+      <td>Q03 — p-tau diagnostic performance</td>
+      <td>0.33</td>
+      <td>0.50</td>
+      <td>4</td>
+      <td>6</td>
+    </tr>
+    <tr>
+      <td>Q07 — Biomarkers for early AD intervention</td>
+      <td>1.00</td>
+      <td>1.00</td>
+      <td>2</td>
+      <td><strong>8</strong></td>
+    </tr>
+    <tr>
+      <td>Q08 — Resveratrol and uric acid</td>
+      <td>1.00</td>
+      <td>1.00</td>
+      <td><strong>10</strong></td>
+      <td><strong>10</strong></td>
+    </tr>
+    <tr>
+      <td>Q09 — Resveratrol and SCr/BUN</td>
+      <td>1.00</td>
+      <td>1.00</td>
+      <td><strong>10</strong></td>
+      <td><strong>10</strong></td>
+    </tr>
+    <tr>
+      <td>Q11 — PD-L1 in EGFR-mutant NSCLC</td>
+      <td>1.00</td>
+      <td>1.00</td>
+      <td>6</td>
+      <td>7</td>
+    </tr>
+    <tr>
+      <td>Q12 — TKI vs ICI in NSCLC</td>
+      <td>1.00</td>
+      <td>1.00</td>
+      <td>4</td>
+      <td>6</td>
+    </tr>
+    <tr>
+      <td>Q13 — Treatment of CRKP</td>
+      <td>1.00</td>
+      <td>1.00</td>
+      <td>4</td>
+      <td>7</td>
+    </tr>
+    <tr>
+      <td>Q14 — Eravacycline vs KPC-2/NDM-1</td>
+      <td>1.00</td>
+      <td>1.00</td>
+      <td>5</td>
+      <td><strong>10</strong></td>
+    </tr>
+  </tbody>
+</table>
+
+<hr />
+
+<h2 id="comparing-with-ragas">Comparing with RAGAS</h2>
+
+<p>After building and running the custom judge, I wanted to see whether a standard framework reaches the same conclusions or not. I used RAGAS, the most widely used open-source RAG evaluation library. I implemented the same eight-dimension rubric using RAGAS.</p>
+
+<p>RAGAS 0.1.21 provides two relevant metric types:</p>
+
+<ul>
+  <li><strong><code class="language-plaintext highlighter-rouge">LabelledRubricsScore</code></strong> — scores answers against a rubric with 1–3 labeled levels. Used for Semantic Coverage and Entity Coverage (our 0–2 dimensions).</li>
+  <li><strong><code class="language-plaintext highlighter-rouge">AspectCritique</code></strong> — binary yes/no judgment against a natural-language definition. Used for all six binary dimensions: Directional Agreement, Quantitative Detail, Contextual Accuracy, Source Attribution, Evidence Strength, and Uncertainty Calibration.</li>
+</ul>
+
+<p>Both are wired to Claude via LangChain’s <code class="language-plaintext highlighter-rouge">ChatAnthropic</code> wrapper, so the same model
+judges both approaches. The critical difference is what context the judge receives.</p>
+
+<p>In the custom implementation, the judge prompt explicitly passes:</p>
+<ul>
+  <li>The reference claim</li>
+  <li>The list of expected entities</li>
+  <li>The expected direction of effect</li>
+  <li>The expected specific context</li>
+</ul>
+
+<p>In the RAGAS implementation, the rubric level descriptions are generic natural language i.e. no expected entities, no expected direction. The judge must infer correctness from the rubric description alone.</p>
+
+<h3 id="three-way-comparison">Three-way comparison</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Query</th>
+      <th>Custom/Rule</th>
+      <th>Custom/LLM</th>
+      <th>RAGAS/Rule</th>
+      <th>Δ (RAGAS − Custom)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Q01 — Blood biomarkers for preclinical AD</td>
+      <td>5</td>
+      <td>5</td>
+      <td>0.0</td>
+      <td>−5.0</td>
+    </tr>
+    <tr>
+      <td>Q02 — Plasma amyloid-beta accuracy</td>
+      <td>4</td>
+      <td>6</td>
+      <td>0.0</td>
+      <td>−4.0</td>
+    </tr>
+    <tr>
+      <td>Q03 — p-tau diagnostic performance</td>
+      <td>4</td>
+      <td>6</td>
+      <td>1.0</td>
+      <td>−3.0</td>
+    </tr>
+    <tr>
+      <td>Q07 — Biomarkers for early AD intervention</td>
+      <td>2</td>
+      <td><strong>8</strong></td>
+      <td>0.0</td>
+      <td>−2.0</td>
+    </tr>
+    <tr>
+      <td>Q08 — Resveratrol and uric acid</td>
+      <td><strong>10</strong></td>
+      <td><strong>10</strong></td>
+      <td>8.0</td>
+      <td>−2.0</td>
+    </tr>
+    <tr>
+      <td>Q09 — Resveratrol and SCr/BUN</td>
+      <td><strong>10</strong></td>
+      <td><strong>10</strong></td>
+      <td>7.0</td>
+      <td>−3.0</td>
+    </tr>
+    <tr>
+      <td>Q11 — PD-L1 in EGFR-mutant NSCLC</td>
+      <td>6</td>
+      <td>7</td>
+      <td>1.0</td>
+      <td>−5.0</td>
+    </tr>
+    <tr>
+      <td>Q12 — TKI vs ICI in NSCLC</td>
+      <td>4</td>
+      <td>6</td>
+      <td>3.0</td>
+      <td>−1.0</td>
+    </tr>
+    <tr>
+      <td>Q13 — Treatment of CRKP</td>
+      <td>4</td>
+      <td>7</td>
+      <td>0.0</td>
+      <td>−4.0</td>
+    </tr>
+    <tr>
+      <td>Q14 — Eravacycline vs KPC-2/NDM-1</td>
+      <td>5</td>
+      <td><strong>10</strong></td>
+      <td>3.0</td>
+      <td>−2.0</td>
+    </tr>
+    <tr>
+      <td><strong>Mean</strong></td>
+      <td><strong>5.40</strong></td>
+      <td><strong>7.50</strong></td>
+      <td><strong>2.30</strong></td>
+      <td><strong>−3.10</strong></td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="why-ragas-scores-significantly-lower">Why RAGAS scores significantly lower</h3>
+
+<p>RAGAS gives a mean of <strong>2.30/10</strong> versus our custom judge’s 5.40/10. The three dimensions (Source Attribution, Evidence Strength, and Uncertainty Calibration) make this divergence even more visible: RAGAS scores 0.00/1 on Source Attribution and Uncertainty Calibration for all but the best-structured documents, because its generic <code class="language-plaintext highlighter-rouge">AspectCritique</code> definitions lack the domain-specific context to judge these properties accurately. The divergence is largest on the Alzheimer’s and infectious disease queries requiring expert knowledge to assess.</p>
+
+<p><strong>Q01, Q02, Q07, and Q13 score 0/10 under RAGAS</strong> but between 2/10 and 5/10 under our judge. The RAGAS rubric descriptions give the model no indication of what a correct answer looks like for these domain-specific queries. A rubric level that says “the answer generally aligns with the ground truth” cannot tell the judge whether preclinical Alzheimer’s detection or KPC-2/NDM-1 co-production were addressed. This means the model lacks sufficient domain context to infer it from generic level descriptions.</p>
+
+<p><strong>Source Attribution and Uncertainty Calibration score 0.00 across all RAGAS queries.</strong>
+These are the two dimensions where the gap is most glaring. Our custom judge prompt explicitly defines what counts as a citation ([N] format) and what counts as calibrated hedging. RAGAS receives these as generic <code class="language-plaintext highlighter-rouge">AspectCritique</code> definitions with no examples, and the rule-based synthesizer’s citation format (which uses [N] consistently) is simply not recognised by the generic judge as satisfying attribution criteria.</p>
+
+<p><strong>Q08 and Q09 are the closest to three-way agreement.</strong> The resveratrol findings are
+so explicit — WMD −0.42, P = 0.0005, 12 RCTs, T2DM — that even a generic judge reaches a similar score. Q08 in RAGAS scores 8/10 (vs 10/10 custom), only missing Source Attribution and Uncertainty Calibration.</p>
+
+<p><strong>Contextual Accuracy collapses in RAGAS (0.30/1).</strong> Our <code class="language-plaintext highlighter-rouge">AspectCritique</code> definition
+says explicitly: <em>“Generic phrases like ‘in patients’ do not qualify.”</em> That strictness is in our prompt. The RAGAS equivalent lacks this instruction, so broad contextual language earns credit it would not receive from a domain-grounded judge.</p>
+
+<h3 id="what-this-tells-us-about-judge-design">What this tells us about judge design</h3>
+
+<p>The comparison confirms a practical rule: <strong>the judge is only as good as the context
+you give it.</strong> Generic rubric levels produce generic scores. Domain-specific rubrics
+that pass expected entities and directions into the judge prompt produce scores that
+track clinical utility rather than just surface-level relevance.</p>
+
+<p>RAGAS is the right choice when you need benchmark comparability across systems and
+domains. The custom judge is the right choice when you need scores that are grounded
+in what your specific corpus actually contains and what your users actually need to know.</p>
+
+<hr />
+
+<h2 id="what-the-results-reveal">What the Results Reveal</h2>
+
+<h3 id="finding-1-retrieval-is-the-solved-problem-synthesis-is-where-answers-fail">Finding 1: Retrieval is the solved problem; synthesis is where answers fail</h3>
+
+<p>9 out of 10 queries hit MRR = 1.0. The right document was retrieved. But the average
+answer quality with the rule-based synthesizer was 5.40/10. It is well below what a careful reader of the source paper would produce.</p>
+
+<p>This is the core gap that retrieval metrics hide. High MRR tells you the engine found the evidence. It says nothing about whether that evidence was turned into a useful clinical statement.</p>
+
+<h3 id="finding-2-directional-agreement-and-uncertainty-calibration-are-the-biggest-differentiators">Finding 2: Directional agreement and uncertainty calibration are the biggest differentiators</h3>
+
+<p>The rule-based synthesizer scored 0.40/1 on directional agreement and only 0.30/1 on
+uncertainty calibration. Claude scored 0.80/1 on both — a full doubling on direction and a tripling on calibration.</p>
+
+<p>Why the gap on uncertainty calibration? The rule-based synthesizer uses a fixed template:
+“Based on direct evidence from N source(s), the following can be stated…” It applies
+the same assertive framing regardless of whether the evidence is a 12-RCT meta-analysis or a single abstract. Claude reads the evidence and adjusts its language: strong evidence gets clear assertions and incomplete evidence gets explicit hedging and a note that the corpus lacks sufficient data.</p>
+
+<p>For clinical decision support, both properties matter equally. “This drug affects uric acid” is not the same as “this drug reduces uric acid.” And “resveratrol reduces uric acid” said with the same confidence as “eravacycline may have activity in vitro, though clinical data are lacking” gives the clinician no signal about how much to rely on either.</p>
+
+<h3 id="finding-3-quantitative-detail-remains-the-hardest-dimension">Finding 3: Quantitative detail remains the hardest dimension</h3>
+
+<p>Both synthesizers score poorly here — 0.20 and 0.30 respectively. The gap between
+them is the smallest of any dimension.</p>
+
+<p>This is a chunking problem and not a synthesis problem. The statistics live in the Results sections of the papers. The rule-based chunker slices documents into fixed-size windows, and in several cases the top-ranked chunks come from Abstract or Discussion sections and not from Results. The numbers are in the corpus but not in the retrieved evidence passed to the synthesizer.</p>
+
+<h3 id="finding-4-q01-and-q02-are-stuck--and-it-is-not-the-synthesizers-fault">Finding 4: Q01 and Q02 are stuck — and it is not the synthesizer’s fault</h3>
+
+<p>The Alzheimer’s blood biomarker queries (Q01, Q02) score 5/10 even with Claude. The
+judge’s rationale for Q01 with the LLM synthesizer:</p>
+
+<blockquote>
+  <p><em>“The answer explicitly acknowledges the absence of specific performance data —
+plasma p-tau217 and Aβ42/40 ratio are mentioned as examples of what is missing from
+the excerpts. Directional agreement and quantitative detail are absent.”</em></p>
+</blockquote>
+
+<p>Claude is accurately reporting what the retrieved chunks contain. The chunks are from the introduction and discussion sections, which establish the importance of the topic but do not report the actual diagnostic performance numbers. No amount of synthesis improvement fixes this — the fix is upstream: better chunking or section-aware retrieval that preferentially pulls from Results sections for diagnosis-intent queries.</p>
+
+<h3 id="finding-5-perfect-1010-scores-cluster-around-clean-quantitative-documents">Finding 5: Perfect 10/10 scores cluster around clean quantitative documents</h3>
+
+<p>Three queries score 10/10 with Claude (Q08, Q09, Q14). All three draw from documents
+with clearly structured results sections and explicit effect sizes. The cardiology
+meta-analysis (resveratrol) is particularly well-structured. It reports pooled WMD
+values with confidence intervals and p-values in dedicated paragraphs that chunk cleanly.</p>
+
+<p>The three dimensions (Source Attribution, Evidence Strength, Uncertainty Calibration) are all achieved at once for these queries: the LLM synthesizer uses [N] citations, names the meta-analysis study design explicitly, and applies appropriately assertive language because the pooled RCT evidence is strong. Structure upstream → full marks downstream.</p>
+
+<p>The lesson: document quality and structure upstream determines answer quality downstream.</p>
+
+<hr />
+
+<h2 id="what-comes-next">What Comes Next</h2>
+
+<p>The eval identified three concrete improvement directions, ordered by expected impact:</p>
+
+<p><strong>1. Section-aware retrieval for diagnosis-intent queries.</strong>
+When <code class="language-plaintext highlighter-rouge">QueryAnalyzer</code> classifies a query as <code class="language-plaintext highlighter-rouge">diagnosis</code>, the retrieval pipeline should up-weight chunks from Results and Methods sections. The chunk metadata already stores the section label. It just is not used as a retrieval signal yet.</p>
+
+<p><strong>2. Late chunking or larger chunk size for statistical content.</strong>
+The current fixed-size chunker often splits a results paragraph across chunk boundaries, separating the finding from its effect size. Late chunking (embed the full document first and then chunk) or simply increasing chunk size for numeric-heavy sections would keep the statistics with their context.</p>
+
+<p><strong>3. Query decomposition for multi-part queries.</strong>
+Q12 (TKI vs ICI comparison) asks about both TKIs <em>and</em> ICIs, and the judge notes that progression-free survival is never explicitly mentioned despite being in the document. A query decomposition step that breaks multi-entity comparison queries into sub-queries and merges the results would surface more of the relevant evidence.</p>
+
+<hr />
+
+<h2 id="takeaways">Takeaways</h2>
+
+<p>Using an LLM as a judge is not just another benchmark. It measures something that
+retrieval metrics structurally cannot i.e. whether the final answer is clinically
+actionable. The eight-dimension rubric makes failure modes explicit and attributable:
+you can see whether a low score is a retrieval failure (wrong document), a chunking
+failure (right document, wrong section), or a synthesis failure (right evidence, vague conclusion). The three dimensions add a safety layer: source attribution catches unsourced assertions, evidence strength catches unsupported conclusions, and uncertainty calibration catches both false confidence and excessive hedging.</p>
+
+<p>The results here confirm an intuition that many RAG practitioners share but rarely
+quantify: retrieval is the easier half of the problem. Once the right document is found, turning it into a precise, directional, calibrated clinical statement — with inline citations, an explicit study design, and appropriate confidence language — is where the real difficulty lies. The LLM synthesizer scores 7.50/10 vs the rule-based 5.40/10. That 2.10-point gap represents the quantified value of synthesis over extraction.</p>
+
+<p>The full implementation: rubric, reference claims, judge, and CLI can be found in <code class="language-plaintext highlighter-rouge">evals/</code> alongside the retrieval eval. Run both together with:</p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>python evals/answer_eval.py <span class="nt">--with-retrieval</span> <span class="nt">--verbose</span>
+python evals/answer_eval.py <span class="nt">--llm</span> <span class="nt">--with-retrieval</span> <span class="nt">--verbose</span>
+</code></pre></div></div>
+
+<p>The gap between the two runs is the quantified value of LLM synthesis over rule-based extraction.</p>
+
+<hr />
+
+<p><em>Code: <a href="https://github.com/ricchasethi/rag-biomedical-decision">github.com/ricchasethi/rag-biomedical-decision</a></em></p>]]></content><author><name></name></author><summary type="html"><![CDATA[Building BioRAG: A Decision-Support RAG System for Biomedical Literature]]></summary></entry><entry><title type="html">BioRAG: Part 5</title><link href="/2026/06/01/BioRAG-part5-evaluation-mrr-ndcg.html" rel="alternate" type="text/html" title="BioRAG: Part 5" /><published>2026-06-01T00:00:00+10:00</published><updated>2026-06-01T00:00:00+10:00</updated><id>/2026/06/01/BioRAG-part5-evaluation-mrr-ndcg</id><content type="html" xml:base="/2026/06/01/BioRAG-part5-evaluation-mrr-ndcg.html"><![CDATA[<h1 id="building-biorag-a-decision-support-rag-system-for-biomedical-literature">Building BioRAG: A Decision-Support RAG System for Biomedical Literature</h1>
+
+<p><strong>Part 5 — Evaluation, MRR, NDCG, and Lessons from Building Retrieval Evals</strong></p>
+
+<hr />
+
+<h2 id="where-we-left-off">Where We Left Off</h2>
+
+<p>The previous four posts built the pipeline. Post 1 covered query analysis and BM25 retrieval. Post 2 covered reranking and evidence classification. Post 3 covered confidence scoring and gap detection. Post 4 covered LLM synthesis and serving.</p>
+
+<p>None of those posts asked the hardest question: does any of it actually work?</p>
+
+<p>“Works” in retrieval has a precise meaning. The issue is system always returns results even from an irrelevant corpus. It means the results that matter are ranked near the top, and the results that do not matter are ranked below them. Measuring that precisely is what the <code class="language-plaintext highlighter-rouge">evals/</code> harness is for.</p>
+
+<hr />
+
+<h2 id="what-the-harness-measures">What the Harness Measures</h2>
+
+<p>The harness evaluates two pipeline stages independently:</p>
+
+<ul>
+  <li><strong>Stage A — BM25 alone.</strong> The <code class="language-plaintext highlighter-rouge">InvertedIndex</code> retrieves the top-60 chunks by raw BM25 score, aggregated to document level.</li>
+  <li><strong>Stage B — BM25 + Reranker.</strong> The same BM25 output is passed through <code class="language-plaintext highlighter-rouge">Reranker.rerank()</code>, producing a top-5 document list.</li>
+</ul>
+
+<p>Comparing them isolates the reranker’s contribution. If Stage B is better, the reranker is earning its place. If Stage B is worse, the reranker is introducing a regression. With a single aggregate metric across the whole pipeline, you cannot tell which stage caused a change. With two independent measurements, you can.</p>
+
+<p>The evaluator bypasses the full <code class="language-plaintext highlighter-rouge">engine.query()</code> path and calls components directly:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">q_analysis</span> <span class="o">=</span> <span class="bp">self</span><span class="p">.</span><span class="n">engine</span><span class="p">.</span><span class="n">query_analyzer</span><span class="p">.</span><span class="n">analyze</span><span class="p">(</span><span class="n">rq</span><span class="p">.</span><span class="n">query</span><span class="p">)</span>
+
+<span class="c1"># Stage A
+</span><span class="n">bm25_chunks</span> <span class="o">=</span> <span class="bp">self</span><span class="p">.</span><span class="n">engine</span><span class="p">.</span><span class="n">index</span><span class="p">.</span><span class="n">search</span><span class="p">(</span><span class="n">q_analysis</span><span class="p">[</span><span class="s">"expanded_tokens"</span><span class="p">],</span> <span class="n">top_k</span><span class="o">=</span><span class="mi">60</span><span class="p">)</span>
+<span class="n">bm25_doc_ranking</span> <span class="o">=</span> <span class="bp">self</span><span class="p">.</span><span class="n">_chunks_to_doc_ranking</span><span class="p">(</span><span class="n">bm25_chunks</span><span class="p">)</span>
+
+<span class="c1"># Stage B
+</span><span class="n">reranked_chunks</span> <span class="o">=</span> <span class="bp">self</span><span class="p">.</span><span class="n">engine</span><span class="p">.</span><span class="n">reranker</span><span class="p">.</span><span class="n">rerank</span><span class="p">(</span><span class="n">bm25_chunks</span><span class="p">,</span> <span class="n">q_analysis</span><span class="p">,</span> <span class="n">top_k</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+<span class="n">reranked_doc_ranking</span> <span class="o">=</span> <span class="bp">self</span><span class="p">.</span><span class="n">_chunks_to_doc_ranking</span><span class="p">(</span><span class="n">reranked_chunks</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>The evidence classifier and synthesizer are not involved. They operate on the output of retrieval; they do not change retrieval quality and should not contaminate the measurement.</p>
+
+<hr />
+
+<h2 id="chunk-to-document-aggregation">Chunk-to-Document Aggregation</h2>
+
+<p>BM25 retrieves chunks. The ground truth labels documents. Bridging that gap requires a choice.</p>
+
+<p>The harness uses <strong>max-pooling</strong>: group all chunks by <code class="language-plaintext highlighter-rouge">doc_id</code>, take the highest-scoring chunk per document, and sort documents by that maximum.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">_chunks_to_doc_ranking</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chunks</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RetrievedChunk</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">float</span><span class="p">]]:</span>
+    <span class="n">doc_scores</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">rc</span> <span class="ow">in</span> <span class="n">chunks</span><span class="p">:</span>
+        <span class="n">doc_id</span> <span class="o">=</span> <span class="n">rc</span><span class="p">.</span><span class="n">chunk</span><span class="p">.</span><span class="n">doc_id</span>
+        <span class="n">doc_scores</span><span class="p">[</span><span class="n">doc_id</span><span class="p">]</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">doc_scores</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="n">doc_id</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">),</span> <span class="n">rc</span><span class="p">.</span><span class="n">score</span><span class="p">)</span>
+    <span class="k">return</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">doc_scores</span><span class="p">.</span><span class="n">items</span><span class="p">(),</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">reverse</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>The alternative is mean-pooling: average all chunk scores for a document. Mean-pooling is appropriate when relevance is distributed evenly across a document’s content. For biomedical papers, it is not. A paper’s key finding might appear in one Results-section chunk with a high BM25 score. And every other chunk from the same paper is methods boilerplate or background text with low scores. Mean-pooling dilutes the strong signal with noise. Max-pooling treats one excellent chunk as sufficient evidence that the document is relevant.</p>
+
+<p><strong>Why <code class="language-plaintext highlighter-rouge">_bm25_top_k = 60</code>:</strong> The evaluator retrieves 60 chunks at the BM25 stage, far more than the engine’s default <code class="language-plaintext highlighter-rouge">retrieval_top_k=15</code>. With a 4-document corpus and roughly 10 chunks per document, capping at 15 would leave documents unrepresented in the BM25 ranking. The eval harness needs every document to have a score, so the ceiling is set generously. Production retrieval does not need this — it is eval-specific.</p>
+
+<hr />
+
+<h2 id="the-ground-truth">The Ground Truth</h2>
+
+<p><code class="language-plaintext highlighter-rouge">evals/ground_truth.py</code> defines 16 <code class="language-plaintext highlighter-rouge">RetrievalQuery</code> objects with hand-labelled <code class="language-plaintext highlighter-rouge">relevant_docs</code> dicts. Each entry maps a <code class="language-plaintext highlighter-rouge">doc_id</code> to a relevance grade:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Grade</th>
+      <th>Meaning</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">2</code></td>
+      <td>Highly relevant — the document directly answers the question</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">1</code></td>
+      <td>Partially relevant — related but tangential</td>
+    </tr>
+    <tr>
+      <td>absent</td>
+      <td>Irrelevant (grade 0)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The corpus has four documents: a cardiovascular/diabetes paper, an oncology paper, an infectious disease paper, and an Alzheimer’s biomarker review. The 16 queries are split across five sub-lists:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">EVAL_QUERIES</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">ALZHEIMER_QUERIES</span>   <span class="c1"># Q01–Q07 — seven queries, one relevant doc each
+</span>    <span class="o">+</span> <span class="n">CARDIO_QUERIES</span>    <span class="c1"># Q08–Q10 — three queries, one or two relevant docs
+</span>    <span class="o">+</span> <span class="n">ONCO_QUERIES</span>      <span class="c1"># Q11–Q12 — two comparison/treatment queries
+</span>    <span class="o">+</span> <span class="n">INFECT_QUERIES</span>    <span class="c1"># Q13–Q14 — two treatment queries
+</span>    <span class="o">+</span> <span class="n">CROSS_QUERIES</span>     <span class="c1"># Q15–Q16 — cross-topic discrimination queries
+</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Q15 is the most demanding query in the set:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">RetrievalQuery</span><span class="p">(</span>
+    <span class="n">query_id</span><span class="o">=</span><span class="s">"Q15"</span><span class="p">,</span>
+    <span class="n">query</span><span class="o">=</span><span class="s">"What systematic review evidence exists for biomarker-guided therapy in complex diseases?"</span><span class="p">,</span>
+    <span class="n">intent</span><span class="o">=</span><span class="s">"general"</span><span class="p">,</span>
+    <span class="n">relevant_docs</span><span class="o">=</span><span class="p">{</span>
+        <span class="s">"neuro_2026_001"</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span>   <span class="c1"># umbrella review of biomarker systematic reviews
+</span>        <span class="s">"cardio_2026_001"</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>  <span class="c1"># RCT meta-analysis in diabetes
+</span>        <span class="s">"onco_2026_001"</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>    <span class="c1"># biomarker-guided therapy in NSCLC
+</span>    <span class="p">},</span>
+<span class="p">)</span>
+</code></pre></div></div>
+
+<p>Three documents are relevant at different grades. A system that retrieves all three but ranks the oncology paper first (because “biomarker-guided” appears prominently in its abstract) scores lower than one that ranks the Alzheimer’s review first. Q15 tests whether the system can discriminate primary relevance from partial relevance when multiple documents match the query’s generic vocabulary.</p>
+
+<p>Q16 is the discrimination test: a query about drug-resistant bacterial infections should surface <code class="language-plaintext highlighter-rouge">infect_2026_001</code> at rank 1 and push the three unrelated papers below it, even though all four papers contain the word “treatment” and generic disease vocabulary.</p>
+
+<hr />
+
+<h2 id="the-metrics">The Metrics</h2>
+
+<h3 id="mrr-mean-reciprocal-rank">MRR (Mean Reciprocal Rank)</h3>
+
+<p>MRR measures how quickly the system surfaces the <strong>first</strong> relevant result. For each query, find the rank of the first relevant document in the top-K list. Its reciprocal rank is <code class="language-plaintext highlighter-rouge">1/rank</code>. MRR is the mean over all queries.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">reciprocal_rank</span><span class="p">(</span><span class="n">doc_ranking</span><span class="p">,</span> <span class="n">relevant_docs</span><span class="p">,</span> <span class="n">k</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+    <span class="k">for</span> <span class="n">rank</span><span class="p">,</span> <span class="p">(</span><span class="n">doc_id</span><span class="p">,</span> <span class="n">_score</span><span class="p">)</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">doc_ranking</span><span class="p">[:</span><span class="n">k</span><span class="p">],</span> <span class="n">start</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">relevant_docs</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="n">doc_id</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span> <span class="mf">1.0</span> <span class="o">/</span> <span class="n">rank</span>
+    <span class="k">return</span> <span class="mf">0.0</span>
+</code></pre></div></div>
+
+<p>A relevant document at rank 1 contributes 1.0. At rank 2, it contributes 0.5. At rank 3, 0.33. MRR falls to 0 if no relevant document appears in the top-K.</p>
+
+<p><strong>Why MRR for decision support:</strong> A clinician using BioRAG reads results until they find a useful answer. They stop at the first one that answers their question. MRR penalises a system that buries the answer at rank 3 twice as harshly as one that surfaces it at rank 2. That penalty structure matches the actual cost of a bad ranking in a clinical use case.</p>
+
+<h3 id="ndcg-normalised-discounted-cumulative-gain">NDCG (Normalised Discounted Cumulative Gain)</h3>
+
+<p>NDCG accounts for the full ranked list and the graded relevance distinctions. Its formula:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>DCG@K  = Σ (2^rel_i − 1) / log2(i + 1)   for i = 1 … K
+IDCG@K = DCG of the ideal (perfect) ordering
+NDCG@K = DCG@K / IDCG@K
+</code></pre></div></div>
+
+<p>The exponential gain formula <code class="language-plaintext highlighter-rouge">2^rel − 1</code> matters:</p>
+<ul>
+  <li>Grade 2 → gain of 3</li>
+  <li>Grade 1 → gain of 1</li>
+  <li>Grade 0 → gain of 0</li>
+</ul>
+
+<p>A grade-2 document contributes three times as much as a grade-1 document at the same rank. For Q15, correctly placing the Alzheimer’s review at rank 1 matters far more than whether the oncology paper appears at rank 2 or rank 3.</p>
+
+<p>The log2 discount means rank 1 is worth roughly 3× rank 3. A system that places the grade-2 document at rank 3 instead of rank 1 scores substantially lower, even though it technically “found” the document.</p>
+
+<p><strong>K values evaluated: 1, 3, and 5.</strong></p>
+
+<ul>
+  <li>K=1 — did the top result hit?</li>
+  <li>K=3 — quality of the first screen of results, which is what a user typically reviews</li>
+  <li>K=5 — covers all four corpus documents, so it acts as a global ranking quality ceiling</li>
+</ul>
+
+<p>For a 4-document corpus, NDCG@5 measures how well the system ordered all documents relative to the ideal ordering. For production use where the corpus is thousands of documents, K=5 is far from a ceiling. But the K=3 signal remains the most actionable: if your reranker hurts NDCG@3, users are getting worse results on their first screen.</p>
+
+<hr />
+
+<h2 id="reading-the-output">Reading the Output</h2>
+
+<p>The report is structured as a summary table, a by-intent breakdown, and optional per-query detail:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  BioRAG Retrieval Eval  (16 queries)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Metric              BM25    Reranked         Δ
+  ────────────────────────────────────────────────────────────
+  MRR@5              0.863       0.906      +0.043
+  NDCG@1             0.813       0.875      +0.063
+  NDCG@3             0.844       0.891      +0.047
+  NDCG@5             0.876       0.882      +0.006
+
+  Note: Δ = Reranked − BM25  (positive = reranker improves ranking)
+
+  By Intent           N    BM25 MRR   Reranked       Δ
+  ────────────────────────────────────────────────────────────
+  comparison          3       0.833      0.833      +0.000
+  diagnosis           4       0.875      0.938      +0.063
+  epidemiology        1       1.000      1.000      +0.000
+  general             1       0.750      0.750      +0.000
+  mechanism           1       1.000      1.000      +0.000
+  prognosis           1       1.000      1.000      +0.000
+  treatment           5       0.800      0.860      +0.060
+</code></pre></div></div>
+
+<h3 id="what-the-δ-column-reveals">What the Δ column reveals</h3>
+
+<p>A positive Δ means the reranker improved ranking over raw BM25. A negative Δ means it introduced a regression. The Δ column is the primary diagnostic signal.</p>
+
+<p><strong>When a negative NDCG@3 Δ is a reranker bug:</strong> If a query with a single grade-2 relevant document shows BM25 placing it at rank 2 and the reranker demoting it to rank 4, that is a section weighting or discriminative-token penalty misfiring. Diagnosis: run <code class="language-plaintext highlighter-rouge">--verbose</code> to see the per-query top-3 for both stages, identify which document moved and why. Check whether its section header was detected correctly (a <code class="language-plaintext highlighter-rouge">Body</code>-classified Results section receives no section boost). Check whether any of its key terms accidentally landed in <code class="language-plaintext highlighter-rouge">_GENERIC_BIO_TERMS</code> and were excluded from the discriminative set.</p>
+
+<p><strong>When a negative NDCG@5 Δ is expected:</strong> With <code class="language-plaintext highlighter-rouge">rerank_top_k=5</code> and a corpus of 4 documents, the reranker is not cutting any documents — they all fit within the budget. For a larger corpus where <code class="language-plaintext highlighter-rouge">rerank_top_k</code> is genuinely constraining, a negative NDCG@5 Δ can appear even when NDCG@3 is positive. This happens when BM25 had a grade-1 document at rank 6 that the reranker deprioritised below rank 5, improving the top-3 precision but losing the grade-1 document from the scored window. This is not a bug — it is the reranker doing its job. The question is whether the trade-off is worth it for your use case. If users only review the first three results, a positive NDCG@3 and negative NDCG@5 is a net improvement.</p>
+
+<p>The by-intent breakdown is where the most actionable signal lives. The <code class="language-plaintext highlighter-rouge">comparison</code> intent shows Δ = 0.000 — the reranker is neither helping nor hurting. That is a candidate for tuning: <code class="language-plaintext highlighter-rouge">SECTION_WEIGHTS["comparison"]</code> currently weights Results at 1.4× and Discussion at 1.2×. If <code class="language-plaintext highlighter-rouge">--verbose</code> shows comparison queries retrieving Discussion chunks first, the Results weight may need raising or section detection for that document type may need fixing.</p>
+
+<hr />
+
+<h2 id="running-the-harness">Running the Harness</h2>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># All 16 queries</span>
+python evals/retrieval_eval.py
+
+<span class="c"># Alzheimer's subset only (Q01–Q07)</span>
+python evals/retrieval_eval.py <span class="nt">--alzheimer-only</span>
+
+<span class="c"># Per-query top-3 detail vs ground truth</span>
+python evals/retrieval_eval.py <span class="nt">--verbose</span>
+
+<span class="c"># Custom K values</span>
+python evals/retrieval_eval.py <span class="nt">--ks</span> 1 5 10
+</code></pre></div></div>
+
+<p>The <code class="language-plaintext highlighter-rouge">--verbose</code> flag is the most useful for debugging. Each row shows the top-3 retrieved documents for both BM25 and Reranked stages alongside the ground truth. When a document that should be at rank 1 appears at rank 3, the verbose output makes the failure obvious at a glance.</p>
+
+<p><strong>Adding new queries to the ground truth</strong> is the main maintenance task after corpus changes. The pattern is:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">RetrievalQuery</span><span class="p">(</span>
+    <span class="n">query_id</span><span class="o">=</span><span class="s">"Q17"</span><span class="p">,</span>
+    <span class="n">query</span><span class="o">=</span><span class="s">"What is the role of APOE4 in Alzheimer's disease risk?"</span><span class="p">,</span>
+    <span class="n">intent</span><span class="o">=</span><span class="s">"mechanism"</span><span class="p">,</span>
+    <span class="n">relevant_docs</span><span class="o">=</span><span class="p">{</span>
+        <span class="s">"neuro_2026_001"</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span>
+        <span class="s">"new_paper_id"</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+    <span class="p">},</span>
+<span class="p">),</span>
+</code></pre></div></div>
+
+<p>Add it to the appropriate sub-list and it is automatically included in <code class="language-plaintext highlighter-rouge">EVAL_QUERIES</code>. The <code class="language-plaintext highlighter-rouge">query_id</code> is a stable identifier so results are traceable across runs. If NDCG@3 drops after a corpus change, you can run <code class="language-plaintext highlighter-rouge">--verbose</code> and filter on the affected <code class="language-plaintext highlighter-rouge">query_id</code> to see what changed.</p>
+
+<hr />
+
+<h2 id="what-retrieval-evals-cannot-measure">What Retrieval Evals Cannot Measure</h2>
+
+<p>The harness measures one thing: does the right document appear near the top of the ranked list? That is necessary but not sufficient for a functioning decision-support system.</p>
+
+<p><strong>Retrieval quality ≠ answer quality.</strong> A system can rank the correct document at rank 1 and still produce a misleading answer if the synthesizer misrepresents the evidence, the evidence classifier mislabels a contradictory finding as direct, or the knowledge gap detector fails to fire when it should. These failures are invisible to MRR and NDCG because they happen downstream of retrieval.</p>
+
+<p><strong>Ground truth is expensive.</strong> The 16 queries in this harness took time to label. Each <code class="language-plaintext highlighter-rouge">relevant_docs</code> dict is a human judgement call: is this document grade 2 or grade 1 for this specific query? For a production corpus of hundreds of documents and a realistic query set of 50+ queries, building a comprehensive ground truth is a significant investment that is often skipped. This is why retrieval evals are so frequently absent from RAG systems that could benefit from them.</p>
+
+<p><strong>The eval corpus is small.</strong> Four documents means the harness is sensitive to individual document idiosyncrasies. If <code class="language-plaintext highlighter-rouge">neuro_2026_001</code> happens to contain an unusual amount of repetition of a query term, a BM25 tuning change that helps all other queries may hurt Alzheimer’s queries simply because that document’s scoring is outlier-shaped. With four documents, you cannot tell the difference between a systematic improvement and an improvement that happened to benefit the only relevant document for 7 of 16 queries.</p>
+
+<hr />
+
+<h2 id="what-a-full-answer-quality-evaluation-would-require">What a Full Answer-Quality Evaluation Would Require</h2>
+
+<p>Retrieval evals measure where documents land in a ranked list. Answer-quality evals measure whether the final answer is correct and whether the confidence score is calibrated.</p>
+
+<p>A calibrated confidence score has a specific meaning: if the system assigns confidence 0.81 to a set of answers, approximately 81% of those answers should be correct. Without a labelled answer-quality dataset and a correctness measure, you cannot verify this.</p>
+
+<p>Building that evaluation requires three things retrieval eval does not:</p>
+
+<ol>
+  <li>
+    <p><strong>A set of queries with known correct answers.</strong> For biomedical questions this is hard. The “correct” answer is often a range, depends on population, or is itself contested in the literature. Factoid questions (survival rates, AUC values for specific biomarkers) are easier to evaluate than mechanism questions.</p>
+  </li>
+  <li>
+    <p><strong>A correctness judge.</strong> Human annotation is gold standard but slow. A model-based judge (another LLM assessing whether the answer matches the known correct answer) is faster but introduces its own errors. Whatever method you choose, it needs to be specified clearly enough to be reproducible.</p>
+  </li>
+  <li>
+    <p><strong>Calibration curve measurement.</strong> Run the full pipeline on all eval queries. Bin the results by confidence score. Measure the fraction of correct answers in each bin. Plot confidence vs correctness rate. If the curve is monotonically increasing and close to the diagonal, confidence is calibrated. If high-confidence answers are correct only 60% of the time, the formula coefficients need adjustment.</p>
+  </li>
+</ol>
+
+<p>BioRAG’s confidence formula is conservatively designed: the base of 0.3 and the cap at 0.95 mean it defaults to skepticism. Calibration would require measurement against labelled outcomes, which requires an answer-quality harness that this codebase does not currently have. Building even a small one with 20–30 labelled queries would be the highest-value next step for making the confidence scores clinically trustworthy.</p>
+
+<hr />
+
+<h2 id="lessons-from-building-retrieval-evals">Lessons from Building Retrieval Evals</h2>
+
+<p>A few things that are not obvious until you build one.</p>
+
+<p><strong>Evaluate stages not the pipeline.</strong> A single metric over the whole pipeline hides which stage is responsible for a change. Two independent measurements — BM25 alone, then BM25 + reranker — make regressions attributable and improvements verifiable. The cost is two evaluation passes per query; the benefit is that every tuning change to the reranker has an immediate isolated signal.</p>
+
+<p><strong>Max-pooling is almost always right for chunk-level retrieval.</strong> Mean-pooling sounds more principled but penalises documents that have one excellent chunk and many mediocre ones, which describes most biomedical papers with focused Results sections. If you are unsure, instrument both and compare against your ground truth. Max-pooling wins in every corpus we have tested with this pattern.</p>
+
+<p><strong>NDCG@3 is the number to optimise.</strong> K=1 is too sensitive to a single missed retrieval. K=5 (or higher) includes results the user will never read. K=3 corresponds to the first screen of results and is where the retrieval-quality signal is most actionable.</p>
+
+<p><strong>The by-intent breakdown is where tuning lives.</strong> An aggregate MRR of 0.906 looks good. An intent breakdown that shows comparison queries at Δ = 0.000 and treatment queries at Δ = +0.060 tells you exactly where to tune next. Aggregate numbers hide which query types the system handles well and which it does not.</p>
+
+<p><strong>Ground truth rots.</strong> After ingesting new papers, the relevant document set for existing queries changes. A query about Alzheimer’s biomarkers that had one grade-2 document now has two, but only if you update the ground truth. Stale ground truth produces misleading improvements: a new paper that should be grade-2 for seven queries is invisible to the eval until you add it. Treat ground truth maintenance as a first-class task, not an afterthought.</p>
+
+<hr />
+
+<h2 id="the-series-so-far">The Series So Far</h2>
+
+<p>Five posts, one pipeline. Here is the full map:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Post</th>
+      <th>Stage</th>
+      <th>Key idea</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td>QueryAnalyzer + BM25</td>
+      <td>Exact token matching; discriminative signal in biomedical text lives in rare terms</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>Reranker + EvidenceClassifier</td>
+      <td>Section weighting + discriminative-token recall penalty suppress multi-disease false positives</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>KnowledgeGapDetector + AnswerSynthesizer</td>
+      <td>Confidence is a formula with explicit inputs; calibrated uncertainty is a feature</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>ClaudeSynthesizer + FastAPI + MCP</td>
+      <td>LLM owns only prose generation; structured pipeline owns everything auditable</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>Retrieval eval harness</td>
+      <td>Measure stages independently; retrieval quality and answer quality are different problems</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>BioRAG is not a finished product. The discriminative-token set is hand-curated and needs to become corpus-derived. Section detection misses non-standard headers. The confidence formula is conservative but uncalibrated. The answer-quality harness does not exist yet.</p>
+
+<p>But each of those limitations is documented, localised to a specific component, and addressable without touching the rest of the pipeline. That is what the single-responsibility architecture was designed to make possible.</p>
+
+<hr />
+
+<p><em>BioRAG is built in pure Python stdlib. The core engine — BM25 index, reranker, evidence classifier, synthesizer — has zero external dependencies. PubMed ingestion requires only <code class="language-plaintext highlighter-rouge">requests</code>. LLM answer synthesis requires only <code class="language-plaintext highlighter-rouge">anthropic</code>.</em></p>]]></content><author><name></name></author><summary type="html"><![CDATA[Building BioRAG: A Decision-Support RAG System for Biomedical Literature]]></summary></entry><entry><title type="html">BioRAG: Part 4</title><link href="/2026/05/27/BioRAG-part4-llm-synthesis-server-mcp.html" rel="alternate" type="text/html" title="BioRAG: Part 4" /><published>2026-05-27T00:00:00+10:00</published><updated>2026-05-27T00:00:00+10:00</updated><id>/2026/05/27/BioRAG-part4-llm-synthesis-server-mcp</id><content type="html" xml:base="/2026/05/27/BioRAG-part4-llm-synthesis-server-mcp.html"><![CDATA[<h1 id="building-biorag-a-decision-support-rag-system-for-biomedical-literature">Building BioRAG: A Decision-Support RAG System for Biomedical Literature</h1>
 
 <p><strong>Part 4 of 5 — LLM Answer Synthesis, Prompt Design, and Serving the Engine</strong></p>
 

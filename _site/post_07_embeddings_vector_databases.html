@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1"><!-- Begin Jekyll SEO tag v2.8.0 -->
+<title>Building BioRAG: A Decision-Support RAG System for Biomedical Literature | Research to Production</title>
+<meta name="generator" content="Jekyll v3.10.0" />
+<meta property="og:title" content="Building BioRAG: A Decision-Support RAG System for Biomedical Literature" />
+<meta property="og:locale" content="en_US" />
+<meta name="description" content="Research to production mindset" />
+<meta property="og:description" content="Research to production mindset" />
+<meta property="og:site_name" content="Research to Production" />
+<meta property="og:type" content="website" />
+<meta name="twitter:card" content="summary" />
+<meta property="twitter:title" content="Building BioRAG: A Decision-Support RAG System for Biomedical Literature" />
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"WebPage","description":"Research to production mindset","headline":"Building BioRAG: A Decision-Support RAG System for Biomedical Literature","url":"/post_07_embeddings_vector_databases.html"}</script>
+<!-- End Jekyll SEO tag -->
+<link rel="stylesheet" href="/assets/main.css"><link type="application/atom+xml" rel="alternate" href="/feed.xml" title="Research to Production" /></head>
+<body><header class="site-header" role="banner">
+
+  <div class="wrapper"><a class="site-title" rel="author" href="/">Research to Production</a><nav class="site-nav">
+        <input type="checkbox" id="nav-trigger" class="nav-trigger" />
+        <label for="nav-trigger">
+          <span class="menu-icon">
+            <svg viewBox="0 0 18 15" width="18px" height="15px">
+              <path d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.032C17.335,0,18,0.665,18,1.484L18,1.484z M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.032C17.335,6.031,18,6.696,18,7.516L18,7.516z M18,13.516C18,14.335,17.335,15,16.516,15H1.484 C0.665,15,0,14.335,0,13.516l0,0c0-0.82,0.665-1.483,1.484-1.483h15.032C17.335,12.031,18,12.695,18,13.516L18,13.516z"/>
+            </svg>
+          </span>
+        </label>
+
+        <div class="trigger"><a class="page-link" href="/biorag/">BioRAG</a><a class="page-link" href="/about/">About</a></div>
+      </nav></div>
+</header>
+<main class="page-content" aria-label="Content">
+      <div class="wrapper">
+        <article class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Building BioRAG: A Decision-Support RAG System for Biomedical Literature</h1>
+  </header>
+
+  <div class="post-content">
+    <h1 id="building-biorag-a-decision-support-rag-system-for-biomedical-literature">Building BioRAG: A Decision-Support RAG System for Biomedical Literature</h1>
+
+<p><strong>Part 7 — From Keyword Matching to Meaning: Embeddings and Vector Databases</strong></p>
+
+<hr />
+
+<p>For the first six parts of this series, BioRAG found documents using a single technique: <strong>keyword matching</strong>. It worked well as seen from evals in Part 5. The right document landed at rank 1 most of the time.</p>
+
+<p>But keyword matching has a blind spot which does matter in medicine. This post is about what the blind spot is, the technology that fixes it i.e. <strong>embeddings</strong> and <strong>vector databases</strong> and how they were added to BioRAG without throwing away the keyword search that already worked.</p>
+
+<p>If you have never thought about how a search engine decides what is “relevant”, this post is written for you. No prior knowledge of retrieval is assumed.</p>
+
+<hr />
+
+<h2 id="the-story-so-far-how-bm25-finds-documents">The Story So Far: How BM25 Finds Documents</h2>
+
+<p>When you type a question into BioRAG, the first thing it does is find candidate documents from the corpus. Until now, it did this with an algorithm called <strong>BM25</strong>.</p>
+
+<p>BM25 is a very sophisticated word-counter. When you ask <em>“What plasma biomarkers predict Alzheimer’s disease?”</em>, BM25 breaks your question into words/tokens like <code class="language-plaintext highlighter-rouge">plasma</code>, <code class="language-plaintext highlighter-rouge">biomarkers</code>, <code class="language-plaintext highlighter-rouge">predict</code>, <code class="language-plaintext highlighter-rouge">alzheimer</code>, <code class="language-plaintext highlighter-rouge">disease</code> and then scans every document for those exact words/tokens. A document that contains “alzheimer” five times and “biomarker” three times scores higher than one that mentions them once.</p>
+
+<p>It is a little smarter than raw counting. BM25 adds two refinements:</p>
+
+<ul>
+  <li><strong>Rare words count more.</strong> The word “the” appears everywhere, so matching it tells you nothing. The word “neurofilament” appears rarely, so matching it is a strong signal. BM25 down-weights common words and up-weights rare ones.</li>
+  <li><strong>Repetition has diminishing returns.</strong> The tenth mention of “amyloid” adds less than the second. BM25 saturates so one keyword-stuffed document cannot dominate.</li>
+</ul>
+
+<p>For biomedical text, this is genuinely good. Medicine is full of precise terms like gene names (<code class="language-plaintext highlighter-rouge">APOE4</code>), drug names (<code class="language-plaintext highlighter-rouge">lecanemab</code>), protein markers (<code class="language-plaintext highlighter-rouge">p-tau217</code>) etc. When a clinician searches for <code class="language-plaintext highlighter-rouge">APOE4</code>, they mean <em>that exact gene</em> and BM25’s exact-match behavior is exactly right. This is why BM25 was the default and why the core engine needs zero external dependencies to run it.</p>
+
+<hr />
+
+<h2 id="the-blind-spot-words-that-mean-the-same-thing">The Blind Spot: Words That Mean the Same Thing</h2>
+
+<p>Here is the problem. BM25 matches <strong>words</strong> and not their <strong>meaning</strong>. It has no idea that two different phrases can describe the same thing.</p>
+
+<p>Consider these two phrases:</p>
+
+<ul>
+  <li><em>“plasma biomarkers”</em></li>
+  <li><em>“blood-based protein markers”</em></li>
+</ul>
+
+<p>To a doctor, these are nearly the same concept. But to BM25, they share <strong>zero words</strong>. If your query says “plasma biomarkers” and the most relevant paper in the corpus happens to phrase it as “blood-based protein markers,” BM25 may rank that paper far down the list or even miss it entirely.</p>
+
+<p>This happens constantly in scientific writing because authors deliberately vary their language:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Your query says</th>
+      <th>The paper says</th>
+      <th>Words shared</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>heart attack</td>
+      <td>myocardial infarction</td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td>brain scan</td>
+      <td>neuroimaging</td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td>memory loss</td>
+      <td>cognitive decline</td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td>blood sugar</td>
+      <td>plasma glucose</td>
+      <td>0 (well, “plasma”…)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>A keyword search treats every row above as a complete miss. That is the blind spot: <strong>BM25 cannot retrieve a document whose words it does not literally share with the query, no matter how relevant the document is.</strong></p>
+
+<p>To close this gap, we need to search by <em>meaning</em> instead of by <em>spelling</em>. That is what embeddings do.</p>
+
+<hr />
+
+<h2 id="what-is-an-embedding">What Is an Embedding?</h2>
+
+<p>An <strong>embedding</strong> is a way of turning a piece of text into a list of numbers, a coordinate, such that texts with similar meanings get similar coordinates.</p>
+
+<p>Let me show an example.</p>
+
+<h3 id="a-toy-example-you-can-picture">A toy example you can picture</h3>
+
+<p>Imagine we want to place words on a 2-dimensional map. We get to invent two axes:</p>
+
+<ul>
+  <li><strong>Axis 1 (left ↔ right):</strong> how much the word relates to <em>the heart</em>.</li>
+  <li><strong>Axis 2 (down ↔ up):</strong> how much the word relates to <em>the brain</em>.</li>
+</ul>
+
+<p>Now we place some medical words on this map by giving each one two numbers — <code class="language-plaintext highlighter-rouge">[heart-score, brain-score]</code>:</p>
+
+<ul>
+  <li><code class="language-plaintext highlighter-rouge">alzheimer</code> → <code class="language-plaintext highlighter-rouge">[0.1, 0.9]</code> — barely about the heart, very much about the brain.</li>
+  <li><code class="language-plaintext highlighter-rouge">memory</code> → <code class="language-plaintext highlighter-rouge">[0.2, 0.8]</code> — also brain-ish. <strong>Notice it sits close to <code class="language-plaintext highlighter-rouge">alzheimer</code>.</strong></li>
+  <li><code class="language-plaintext highlighter-rouge">cardiac</code> → <code class="language-plaintext highlighter-rouge">[0.9, 0.1]</code> — very heart, not brain. <strong>Far from <code class="language-plaintext highlighter-rouge">alzheimer</code>.</strong></li>
+  <li><code class="language-plaintext highlighter-rouge">stroke</code> → <code class="language-plaintext highlighter-rouge">[0.6, 0.6]</code> — it involves both, so it sits in the middle.</li>
+</ul>
+
+<p>Now the magic: to find words related to <code class="language-plaintext highlighter-rouge">alzheimer</code>, we do not look for the <em>letters</em> a-l-z-h… We look for the <em>nearest points on the map</em>. <code class="language-plaintext highlighter-rouge">memory</code> is close so it is related, <strong>even though it shares no letters with “alzheimer.”</strong> <code class="language-plaintext highlighter-rouge">cardiac</code> is far, so it is unrelated.</p>
+
+<p>That is an embedding. Each word (or sentence, or paragraph) becomes a point in space and <strong>distance in that space means difference in meaning</strong>. Close together = similar meaning. Far apart = different meaning.</p>
+
+<h3 id="from-2-dimensions-to-768">From 2 dimensions to 768</h3>
+
+<p>My toy map had 2 axes that I picked by hand. Real embedding models do two things differently:</p>
+
+<ol>
+  <li><strong>They use many more dimensions</strong> — hundreds or thousands. The model BioRAG produces <strong>768 numbers</strong> per text. You cannot picture 768-dimensional space, but the math of “which points are close” works exactly the same.</li>
+  <li><strong>Nobody hand-picks the axes.</strong> The model <em>learns</em> them by reading enormous amounts of text. After training, some dimensions end up loosely corresponding to concepts like “is this about oncology,” “is this a statistical result,” “is this past tense”.But, mostly they are abstract directions the model found useful.</li>
+</ol>
+
+<p>The payoff: when a model has read millions of biomedical sentences, it learns that “plasma biomarkers” and “blood-based protein markers” appear in the same contexts. So it places them at nearly the same coordinates. Search by nearness and you find one when you ask for the other. <strong>The blind spot is closed.</strong></p>
+
+<h3 id="how-nearness-is-actually-measured">How “nearness” is actually measured</h3>
+
+<p>When BioRAG compares two embeddings, it uses <strong>cosine similarity</strong>. It is a number from -1 to 1 that measures whether two coordinate-arrows point in the same direction. 1 means “same meaning,” 0 means “unrelated,” negative means “opposite.” You do not need the formula; just hold onto the intuition: <em>higher cosine = closer in meaning.</em></p>
+
+<p>The key idea is that cosine measures the <strong>angle</strong> between two arrows drawn from the origin to each point. Two arrows pointing the same way are “similar” no matter how long they are. The figure below shows it on both sides: the keyword blind spot on the left (same meaning, zero shared words), and on the right the same four medical words drawn as vectors from the origin — <code class="language-plaintext highlighter-rouge">alzheimer</code> and <code class="language-plaintext highlighter-rouge">memory</code> almost overlap (a tiny angle), while <code class="language-plaintext highlighter-rouge">cardiac</code> points off in a very different direction (a wide angle):</p>
+
+<p><img src="blog/linkedin_post_7a_diagram.png" alt="From Spelling to Meaning: Embeddings &amp; Cosine Similarity" /></p>
+
+<p><code class="language-plaintext highlighter-rouge">alzheimer</code> and <code class="language-plaintext highlighter-rouge">memory</code> point almost the same direction, so the angle between them is tiny and the cosine is near 1. <code class="language-plaintext highlighter-rouge">alzheimer</code> and <code class="language-plaintext highlighter-rouge">cardiac</code> point in nearly opposite corners of the space, so the angle is wide and the cosine is low — even though both arrows are the same length. Working through all three comparisons against <code class="language-plaintext highlighter-rouge">alzheimer</code>:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Pair</th>
+      <th>Angle between arrows</th>
+      <th>Cosine similarity</th>
+      <th>Interpretation</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>alzheimer ↔ memory</td>
+      <td>≈ 8°</td>
+      <td><strong>0.99</strong></td>
+      <td>almost identical meaning</td>
+    </tr>
+    <tr>
+      <td>alzheimer ↔ stroke</td>
+      <td>≈ 39°</td>
+      <td><strong>0.78</strong></td>
+      <td>related (stroke touches the brain too)</td>
+    </tr>
+    <tr>
+      <td>alzheimer ↔ cardiac</td>
+      <td>≈ 77°</td>
+      <td><strong>0.22</strong></td>
+      <td>mostly unrelated</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>This is exactly the ranking a clinician would expect: <code class="language-plaintext highlighter-rouge">memory</code> closest to <code class="language-plaintext highlighter-rouge">alzheimer</code>, <code class="language-plaintext highlighter-rouge">cardiac</code> furthest and BioRAG gets it purely from the angles between embedding vectors.</p>
+
+<hr />
+
+<h2 id="choosing-an-embedding-model-for-biorag">Choosing an Embedding Model for BioRAG</h2>
+
+<p>Not all embedding models are equal, and for biomedical text the choice matters a lot. A model that learned its coordinates by reading news articles and Reddit will place medical terms clumsily, because it rarely saw them. A model that learned by reading PubMed will place them precisely.</p>
+
+<p>Every model below is free to download from the <a href="https://huggingface.co/">Hugging Face</a> hub and drops straight into BioRAG’s <code class="language-plaintext highlighter-rouge">EmbeddingModel(model_name=...)</code>. They fall into two families.</p>
+
+<p><strong>General-purpose retrievers</strong> — trained on broad web text, strong all-rounders, small and fast:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Model</th>
+      <th>Dim</th>
+      <th>Advantages</th>
+      <th>Disadvantages</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">all-MiniLM-L6-v2</code></td>
+      <td>384</td>
+      <td>Tiny (~80 MB), very fast, runs comfortably on CPU</td>
+      <td>Weakest on biomedical jargon; rare gene/drug terms placed loosely</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">BAAI/bge-small-en-v1.5</code></td>
+      <td>384</td>
+      <td>Lightweight, retrieval-tuned, available via <code class="language-plaintext highlighter-rouge">fastembed</code> (no <code class="language-plaintext highlighter-rouge">torch</code>)</td>
+      <td>General domain; needs a query-instruction prefix to perform its best</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">BAAI/bge-base-en-v1.5</code></td>
+      <td>768</td>
+      <td>Stronger general retrieval, same dim as the default</td>
+      <td>~3× larger than <code class="language-plaintext highlighter-rouge">bge-small</code>; still not biomedical</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">intfloat/e5-base-v2</code></td>
+      <td>768</td>
+      <td>Excellent general retrieval benchmarks</td>
+      <td>Requires <code class="language-plaintext highlighter-rouge">"query:"</code> / <code class="language-plaintext highlighter-rouge">"passage:"</code> prefixes or quality drops sharply</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">BAAI/bge-large-en-v1.5</code></td>
+      <td>1024</td>
+      <td>Top-tier general accuracy</td>
+      <td>Heavy and slow; GPU strongly recommended; bigger vectors to store</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>Biomedical specialists</strong> — trained on PubMed / clinical text that understand the vocabulary:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Model</th>
+      <th>Dim</th>
+      <th>Advantages</th>
+      <th>Disadvantages</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong><code class="language-plaintext highlighter-rouge">pritamdeka/S-PubMedBert-MS-MARCO</code></strong></td>
+      <td><strong>768</strong></td>
+      <td><strong>PubMed + Q&amp;A tuned; strong question→passage matching; the BioRAG default</strong></td>
+      <td><strong>~440 MB; pulls in <code class="language-plaintext highlighter-rouge">torch</code>; slower than MiniLM</strong></td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">NeuML/pubmedbert-base-embeddings</code></td>
+      <td>768</td>
+      <td>PubMedBERT packaged as a ready sentence-embedder; great on abstracts</td>
+      <td>Tuned for similarity, not specifically Q&amp;A retrieval</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">pritamdeka/S-BioBert-snli-multinli-stsb</code></td>
+      <td>768</td>
+      <td>BioBERT-based, solid biomedical sentence similarity</td>
+      <td>Older; trained on NLI/STS, not retrieval pairs</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">cambridgeltl/SapBERT-from-PubMedBERT-fulltext</code></td>
+      <td>768</td>
+      <td>Superb at entity/synonym matching (gene &amp; drug aliases)</td>
+      <td>Built for entity linking, not passage retrieval - weaker on full questions</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Two practical caveats that trip people up:</p>
+
+<ul>
+  <li><strong>Raw <code class="language-plaintext highlighter-rouge">BioBERT</code> / <code class="language-plaintext highlighter-rouge">PubMedBERT</code> / <code class="language-plaintext highlighter-rouge">ClinicalBERT</code> checkpoints are <em>not</em> embedding models.</strong> They are masked-language models. Without sentence-transformer fine-tuning they produce poor coordinates. Always pick a checkpoint that is explicitly packaged for embeddings (like the four above), not the base model.</li>
+  <li><strong>Switching to a model with a different dimension means re-embedding the whole corpus.</strong> BioRAG sizes its Qdrant collection to the model’s output dim (e.g. 768), so moving to a 384- or 1024-dim model requires a fresh collection. This means delete <code class="language-plaintext highlighter-rouge">./qdrant_data</code> and let it rebuild.</li>
+</ul>
+
+<p>BioRAG defaults to <strong><code class="language-plaintext highlighter-rouge">S-PubMedBert-MS-MARCO</code></strong> for two reasons that compound:</p>
+
+<ol>
+  <li><strong>It read the right material.</strong> It was trained on PubMed, so it has seen “p-tau217,” “amyloid-β,” and “neurofilament light chain” in their natural habitat. It knows they cluster near “Alzheimer’s” and not near “lung cancer.”</li>
+  <li><strong>It was tuned for question-answering.</strong> The “MS-MARCO” part means it was specifically trained to match <em>questions</em> to <em>relevant passages</em>. This is exactly what a search engine does. Many embedding models are trained to match sentences to similar sentences; this one was trained to match a question to its answer.</li>
+</ol>
+
+<h3 id="which-model-for-which-scenario">Which model for which scenario?</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Your situation</th>
+      <th>Pick</th>
+      <th>Why</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Default — best accuracy on PubMed abstracts</td>
+      <td><code class="language-plaintext highlighter-rouge">S-PubMedBert-MS-MARCO</code></td>
+      <td>Domain + question→passage tuning; what BioRAG ships with</td>
+    </tr>
+    <tr>
+      <td>CPU-only box, fast prototyping, demos</td>
+      <td><code class="language-plaintext highlighter-rouge">all-MiniLM-L6-v2</code></td>
+      <td>Smallest and fastest; accept some biomedical fuzziness</td>
+    </tr>
+    <tr>
+      <td>Want to avoid installing <code class="language-plaintext highlighter-rouge">torch</code></td>
+      <td><code class="language-plaintext highlighter-rouge">BAAI/bge-small-en-v1.5</code> via <code class="language-plaintext highlighter-rouge">fastembed</code></td>
+      <td>Runs without the heavy deep-learning stack</td>
+    </tr>
+    <tr>
+      <td>Queries hinge on gene/drug <strong>synonyms &amp; aliases</strong></td>
+      <td><code class="language-plaintext highlighter-rouge">SapBERT-from-PubMedBERT-fulltext</code></td>
+      <td>Purpose-built to map entity variants to the same point</td>
+    </tr>
+    <tr>
+      <td>GPU available, accuracy matters most</td>
+      <td><code class="language-plaintext highlighter-rouge">bge-large-en-v1.5</code> or a large biomedical model</td>
+      <td>Highest ceiling; the cost is speed and storage</td>
+    </tr>
+    <tr>
+      <td>Mixed biomedical + general/clinical corpus</td>
+      <td><code class="language-plaintext highlighter-rouge">NeuML/pubmedbert-base-embeddings</code></td>
+      <td>Strong on abstracts without over-specializing</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The model is swappable in one line of code, so a deployment that cannot afford the heavier PubMed model can drop to the lighter <code class="language-plaintext highlighter-rouge">bge-small</code> and trade some accuracy for speed:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">from</span> <span class="nn">hybrid_retrieval</span> <span class="kn">import</span> <span class="n">EmbeddingModel</span><span class="p">,</span> <span class="n">DenseRetriever</span>
+<span class="kn">from</span> <span class="nn">core.rag_engine</span> <span class="kn">import</span> <span class="n">BioRAGEngine</span>
+
+<span class="c1"># Default: the PubMed-tuned model
+</span><span class="n">engine</span> <span class="o">=</span> <span class="n">BioRAGEngine</span><span class="p">(</span><span class="n">dense_retriever</span><span class="o">=</span><span class="n">DenseRetriever</span><span class="p">(</span><span class="n">EmbeddingModel</span><span class="p">()))</span>
+
+<span class="c1"># Lighter alternative — same interface, smaller footprint
+</span><span class="n">dr</span> <span class="o">=</span> <span class="n">DenseRetriever</span><span class="p">(</span><span class="n">EmbeddingModel</span><span class="p">(</span><span class="s">"BAAI/bge-small-en-v1.5"</span><span class="p">))</span>
+<span class="n">engine</span> <span class="o">=</span> <span class="n">BioRAGEngine</span><span class="p">(</span><span class="n">dense_retriever</span><span class="o">=</span><span class="n">dr</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>A practical note on cost: the embedding model is a neural network that takes real time to run. Embedding the entire corpus once is the expensive step. We do not want to repeat it on every restart and this brings us to where those coordinates live.</p>
+
+<hr />
+
+<h2 id="where-embeddings-live-the-vector-database">Where Embeddings Live: The Vector Database</h2>
+
+<p>Once every chunk of every document has been turned into 768 numbers the problem is now its storage. When a query arrives, we turn <em>it</em> into 768 numbers too, and then we need to answer:</p>
+
+<blockquote>
+  <p><em>Of the thousands of stored coordinates, which ones are nearest to this query’s coordinate?</em></p>
+</blockquote>
+
+<p>Doing this by brute force i.e. comparing the query against every single stored vector works for a few hundred documents but becomes painfully slow as the corpus grows. We need a database built specifically for “find me the nearest points in high-dimensional space.” That is a <strong>vector database</strong>.</p>
+
+<p>BioRAG uses <strong>Qdrant</strong>. A vector database does three jobs an ordinary database cannot:</p>
+
+<ol>
+  <li><strong>It stores vectors efficiently</strong> : thousands of 768-number coordinates, each tagged with which chunk and document it came from.</li>
+  <li><strong>It searches by nearness quite fast.</strong> Instead of checking every vector, it uses clever indexing (think of it as a shortcut map of the space) to find the closest matches in a fraction of the time. This is called <em>approximate nearest neighbor</em> search. It is “approximate” because it trades a tiny, usually invisible amount of accuracy for a huge speed gain.</li>
+  <li><strong>It persists to disk.</strong> The expensive embedding step happens once. The coordinates are saved so a restart reloads them instantly instead of re-embedding the whole corpus.</li>
+</ol>
+
+<p>In BioRAG, the vector database can run three ways, depending on what you are doing:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Mode</th>
+      <th>When</th>
+      <th>Why</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>In-memory</td>
+      <td>Tests and evals</td>
+      <td>Fresh every run, nothing left on disk</td>
+    </tr>
+    <tr>
+      <td>File-based (default)</td>
+      <td>Development</td>
+      <td>Embeddings saved to <code class="language-plaintext highlighter-rouge">./qdrant_data</code>, survive restarts</td>
+    </tr>
+    <tr>
+      <td>Server</td>
+      <td>Production</td>
+      <td>A shared Qdrant service many processes can query</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>There is one subtlety worth calling out because it is the kind of thing that quietly wastes money. Every time BioRAG starts, it re-loads its sample corpus. Without a guard, it would re-embed every chunk on every launch and one has to pay for expensive neural-network cost over and over for text it has already processed. So before embedding, BioRAG asks Qdrant <em>“which of these chunks do you already have?”</em> and embeds only the genuinely new ones. The result: the corpus is embedded <strong>once</strong>, and only freshly ingested papers ever touch the model again.</p>
+
+<hr />
+
+<h2 id="bringing-it-together-two-searches-are-better-than-one">Bringing It Together: Two Searches Are Better Than One</h2>
+
+<p>Here is the design decision that ties the whole post together. I run <strong>both</strong> BM25 and embeddings.</p>
+
+<p>Why keep the old keyword search if embeddings understand meaning? Because the two techniques fail in <em>opposite</em> ways and that is exactly what you want from a pair:</p>
+
+<ul>
+  <li><strong>BM25 is precise but literal.</strong> It nails exact terms like <code class="language-plaintext highlighter-rouge">APOE4</code>, <code class="language-plaintext highlighter-rouge">lecanemab</code>,but misses paraphrases.</li>
+  <li><strong>Embeddings are flexible but fuzzy.</strong> They catch paraphrases like “memory loss” ≈ “cognitive decline”. However, it can occasionally drift toward something that is topically close yet wrong and they can fumble a rare gene ID that the keyword search would have matched perfectly.</li>
+</ul>
+
+<p>When one is weak, the other tends to be strong. So BioRAG sends the query to both, gets two ranked lists, and merges them. The merging method is called <strong>Reciprocal Rank Fusion</strong>. Now the all-important question of <em>whether running both actually produces better answers for Alzheimer’s queries</em> is the entire subject of the next post.</p>
+
+<p>Putting the whole back half of this post together — picking a domain-aware model, storing its vectors in a database that embeds once, and running both searches side by side:</p>
+
+<p><img src="blog/linkedin_post_7b_diagram.png" alt="Choosing an Embedding Model + Where Vectors Live" /></p>
+
+<p>Crucially, the dense retriever is <strong>optional and bolted on</strong>. With no embedding model configured, BioRAG behaves uses pure BM25, zero external dependencies. Add a <code class="language-plaintext highlighter-rouge">dense_retriever</code> and the meaning-based search switches on.</p>
+
+<hr />
+
+<h2 id="takeaways">Takeaways</h2>
+
+<ul>
+  <li><strong>Keyword search (BM25) matches spelling, not meaning.</strong> It is excellent for precise medical terms but blind to paraphrases and scientific writing is full of paraphrases.</li>
+  <li><strong>An embedding turns text into a coordinate</strong> in a high-dimensional space where <em>distance means difference in meaning</em>. Search becomes “find the nearest points” instead of “find the matching letters.” That is how “memory loss” can retrieve a paper about “cognitive decline.”</li>
+  <li><strong>The embedding model must know the domain.</strong> BioRAG uses <code class="language-plaintext highlighter-rouge">S-PubMedBert-MS-MARCO</code>, trained on PubMed and tuned for question-answering, because a model that has actually read biomedical literature places its terms far more accurately than a general-purpose one.</li>
+  <li><strong>A vector database (Qdrant) stores those coordinates and searches them fast,</strong> persisting to disk so the expensive embedding step happens only once.</li>
+  <li><strong>The winning move is not replacing BM25 but combining it with embeddings,</strong> because the two methods fail in opposite ways.</li>
+</ul>
+
+<p>In next blog I will discuss whether that combination actually <em>helps</em> on real Alzheimer’s queries or not.</p>
+
+<hr />
+
+<p><em>Code: <a href="https://github.com/ricchasethi/rag-biomedical-decision">github.com/ricchasethi/rag-biomedical-decision</a></em></p>
+
+  </div>
+
+</article>
+
+      </div>
+    </main><footer class="site-footer h-card">
+  <data class="u-url" href="/"></data>
+
+  <div class="wrapper">
+    <div class="footer-col-wrapper">
+      <div class="footer-col footer-col-1">
+        <ul class="contact-list"></ul>
+      </div>
+
+      <div class="footer-col footer-col-2"><ul class="social-media-list"></ul>
+</div>
+
+      <div class="footer-col footer-col-3">
+        <p>Research to production mindset</p>
+      </div>
+    </div>
+  </div>
+
+</footer>
+</body>
+
+</html>
