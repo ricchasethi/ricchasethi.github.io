@@ -194,3 +194,11 @@ table td { border: 1px solid #e8e8e8; }
 .highlight .vg { color: #008080; }
 .highlight .vi { color: #008080; }
 .highlight .il { color: #099; }
+
+.post-content { font-size: 14px; }
+.post-content h2 { font-size: 26px; }
+.post-content h3 { font-size: 22px; }
+.post-content h4 { font-size: 18px; }
+@media screen and (max-width: 800px) { .post-content h2 { font-size: 22px; }
+  .post-content h3 { font-size: 19px; }
+  .post-content h4 { font-size: 16px; } }
