@@ -170,7 +170,7 @@
 
 <p>The key idea is that cosine measures the <strong>angle</strong> between two arrows drawn from the origin to each point. Two arrows pointing the same way are “similar” no matter how long they are. The figure below shows it on both sides: the keyword blind spot on the left (same meaning, zero shared words), and on the right the same four medical words drawn as vectors from the origin — <code class="language-plaintext highlighter-rouge">alzheimer</code> and <code class="language-plaintext highlighter-rouge">memory</code> almost overlap (a tiny angle), while <code class="language-plaintext highlighter-rouge">cardiac</code> points off in a very different direction (a wide angle):</p>
 
-<p><img src="blog/linkedin_post_7a_diagram.png" alt="From Spelling to Meaning: Embeddings &amp; Cosine Similarity" /></p>
+<p><img src="/blog/linkedin_post_7a_diagram.png" alt="From Spelling to Meaning: Embeddings &amp; Cosine Similarity" /></p>
 
 <p><code class="language-plaintext highlighter-rouge">alzheimer</code> and <code class="language-plaintext highlighter-rouge">memory</code> point almost the same direction, so the angle between them is tiny and the cosine is near 1. <code class="language-plaintext highlighter-rouge">alzheimer</code> and <code class="language-plaintext highlighter-rouge">cardiac</code> point in nearly opposite corners of the space, so the angle is wide and the cosine is low — even though both arrows are the same length. Working through all three comparisons against <code class="language-plaintext highlighter-rouge">alzheimer</code>:</p>
 
@@ -440,7 +440,7 @@
 
 <p>Putting the whole back half of this post together — picking a domain-aware model, storing its vectors in a database that embeds once, and running both searches side by side:</p>
 
-<p><img src="blog/linkedin_post_7b_diagram.png" alt="Choosing an Embedding Model + Where Vectors Live" /></p>
+<p><img src="/blog/linkedin_post_7b_diagram.png" alt="Choosing an Embedding Model + Where Vectors Live" /></p>
 
 <p>Crucially, the dense retriever is <strong>optional and bolted on</strong>. With no embedding model configured, BioRAG behaves uses pure BM25, zero external dependencies. Add a <code class="language-plaintext highlighter-rouge">dense_retriever</code> and the meaning-based search switches on.</p>
 
