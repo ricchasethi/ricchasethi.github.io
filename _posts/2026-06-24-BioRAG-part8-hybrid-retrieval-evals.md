@@ -8,32 +8,32 @@ date: 2026-06-24
 
 # Building BioRAG: A Decision-Support RAG System for Biomedical Literature
 
-**Part 8 — Does Hybrid Retrieval Actually Help? Measuring It on Alzheimer's Queries**
+**Part 8: Does Hybrid Retrieval Actually Help? Measuring It on Alzheimer's Queries**
 
 ---
 
 In Part 7, I added a second way to search BioRAG's corpus. Alongside the original keyword search (BM25), the engine can now search by *meaning* using embeddings stored in a vector database, and it merges the two result lists into one.
 
-That post made the case for *why* this should help. This post asks the only question that matters: **does it?** Not in theory — measured, on real Alzheimer's disease queries, with the numbers laid out honestly, including the places where it makes things worse.
+That post made the case for *why* this should help. This post asks the only question that matters: **does it?** 
 
-The short answer: **for Alzheimer's queries, the full hybrid pipeline lifts the headline metric by about 15%.** The long answer is more interesting than that number, because the gain does not come from where you would expect, and one component nearly cancels it out.
+The short answer: **for Alzheimer's queries, the full hybrid pipeline lifts the headline metric by about 15%.** The long answer is more interesting than that number because the gain does not come from where you would expect.
 
 ---
 
 ## A One-Minute Refresher on the Metrics
 
-Part 5 covered these in depth; here is just enough to read the tables.
+Part 5 covered these in depth: here is just enough to read the tables.
 
 - **MRR@5** (Mean Reciprocal Rank) — *how high does the first correct document land?* If the right document is at rank 1, that query scores 1.0; at rank 2, it scores 0.5; at rank 3, 0.33; if it is nowhere in the top 5, it scores 0. Average across all queries. **Higher is better.** This is the headline number for decision-support, because a clinician reads from the top and stops at the first useful answer.
 - **NDCG@K** (Normalized Discounted Cumulative Gain) — *is the whole ranked list well-ordered?* It rewards putting highly relevant documents above partially relevant ones, and penalizes burying a good document deep in the list. Also 0 to 1, higher is better.
 
-Both measure **retrieval** — whether the right document was *found and ranked well*. They say nothing about whether the final answer was any good; that was Part 6's job.
+Both measure **retrieval**. Whether the right document was *found and ranked well*. They say nothing about whether the final answer was any good. That was Part 6's job.
 
 ---
 
 ## Four Searches, Not Two
 
-To find out whether hybrid retrieval helps, it is not enough to compare "old" against "new." That would tell me the combined system changed, but not *which part* caused the change. So the eval harness (`evals/retrieval_eval.py --hybrid`) measures **four** retrieval modes independently, on the same queries:
+It is not enough to compare "old" against "new" to find whether hybrid retrieval helps or not. That would tell me the combined system changed but not *which part* caused the change. So the eval harness (`evals/retrieval_eval.py --hybrid`) measures **four** retrieval modes independently on the same queries:
 
 | Mode | What it does |
 |---|---|
@@ -79,7 +79,7 @@ Read the last row first. Against the BM25 baseline:
 - **Hybrid (merge, no rerank): −0.019.** **Worse.** Merging the two lists actually *hurt* the headline metric.
 - **Hybrid+Rerank: +0.107.** The full pipeline lifts MRR@5 from 0.714 to 0.821 — a **15% relative improvement** — and lifts NDCG@5 from 0.752 to 0.866.
 
-So the answer is *yes, it helps* — but the story is not "embeddings are better than keywords." Neither dense alone nor the merge alone improved anything. **The entire gain materializes only when the reranker runs on top of the fused candidate set.** That deserves an explanation.
+So the answer is *yes, it helps*. But the story is not "embeddings are better than keywords". Neither dense alone nor the merge alone improved anything. **The entire gain materializes only when the reranker runs on top of the fused candidate set.** That deserves an explanation.
 
 ---
 
@@ -89,8 +89,8 @@ This is the most important finding in the post, so it is worth slowing down.
 
 Think of retrieval as two jobs: **recall** (getting the right documents *somewhere* in the candidate pile) and **precision** (ordering that pile so the best one is on top).
 
-- **Embeddings improve recall.** They drag in relevant documents that BM25 missed because of paraphrasing. But the raw fused ordering is mediocre, because RRF orders by a crude rank-position formula that knows nothing about biomedical sections, entities, or which chunk actually contains the result.
-- **The reranker improves precision.** BioRAG's reranker (Part 2) understands section structure and applies a discriminative-token penalty to suppress off-topic matches. On its own it cannot retrieve a document that was never fetched — but give it a *richer, more complete* candidate pool, and it has better raw material to promote the truly relevant document to rank 1.
+- **Embeddings improve recall.** They drag in relevant documents that BM25 missed because of paraphrasing. But the raw fused ordering is mediocre because RRF orders by a crude rank-position formula that knows nothing about biomedical sections, entities, or which chunk actually contains the result.
+- **The reranker improves precision.** BioRAG's reranker (Part 2) understands section structure and applies a discriminative-token penalty to suppress off-topic matches. On its own it cannot retrieve a document that was never fetched. But give it a *richer, more complete* candidate pool, and it has better raw material to promote the truly relevant document to rank 1.
 
 That is exactly the pattern in the numbers. The merge step (Hybrid) widens the candidate pool that improves recall but slightly scrambles the order. So, MRR dips to 0.695. Then the reranker, now choosing from that wider pool, sorts it properly and pushes MRR up to 0.821. **Fusion supplies the candidates; the reranker converts them into rank-1 hits.** Neither half does the job alone.
 
@@ -114,18 +114,18 @@ Averages hide the mechanism. The per-query MRR@5 breakdown is where you actually
   Q07 (treatment)        1.000     1.000    1.000      1.000
 ```
 
-Three of these queries — Q02, Q05, Q07 — are already solved by every method (all four columns score 1.000), so there is no room to improve them. The action is in the four queries where the methods disagree: Q01, Q03, Q04, and Q06.
+Three of these queries (Q02, Q05, Q07) are already solved by every method (all four columns score 1.000), so there is no room to improve them. The action is in the four queries where the methods disagree: Q01, Q03, Q04, and Q06.
 
-**Q06 (mechanism) — the textbook win for embeddings.**
+**Q06 (mechanism): the textbook win for embeddings.**
 BM25 scores 0.500 (right document at rank 2); Dense, Hybrid, and Hybrid+Rerank all score 1.000 (rank 1). Mechanism questions ("how does X cause Y?") are phrased abstractly and rarely repeat the document's exact vocabulary. Semantic search closes it cleanly. **This single query is the clearest evidence that embeddings retrieve something keywords cannot.**
 
-**Q04 (comparison) — embeddings rescue a total miss.**
-BM25 scores **0.000** — it failed to surface the relevant document anywhere in the top 5. Dense pulls it to 0.500, and Hybrid+Rerank holds it at 0.500. A complete keyword failure turned into a rank-2 hit purely because semantic search understood what the comparison was *about*. When BM25 returns nothing useful, embeddings are the safety net.
+**Q04 (comparison): embeddings rescue a total miss.**
+BM25 scores **0.000**. It failed to surface the relevant document anywhere in the top 5. Dense pulls it to 0.500 and Hybrid+Rerank holds it at 0.500. A complete keyword failure turned into a rank-2 hit purely because semantic search understood what the comparison was *about*. When BM25 returns nothing useful, embeddings are the safety net.
 
-**Q01 (diagnosis) — the cautionary tale.**
-BM25 nails it at 1.000. Dense **collapses to 0.333**, and so does the raw Hybrid merge. For a precise diagnostic query full of exact biomarker names, the fuzzy semantic search actively *hurt* — it dragged in topically-similar-but-wrong documents and demoted the exact match. **But Hybrid+Rerank recovers it back to 1.000**, because the reranker's discriminative-token penalty recognizes the exact-entity match and restores it to the top. This is the single best argument for *hybrid* over *dense-only*: the reranker repairs the damage that pure semantic search does to precise queries.
+**Q01 (diagnosis): the cautionary tale.**
+BM25 nails it at 1.000. Dense **collapses to 0.333** and so does the raw Hybrid merge. For a precise diagnostic query full of exact biomarker names, the fuzzy semantic search actively *hurt* — it dragged in topically-similar-but-wrong documents and demoted the exact match. **But Hybrid+Rerank recovers it back to 1.000**, because the reranker's discriminative-token penalty recognizes the exact-entity match and restores it to the top. This is the single best argument for *hybrid* over *dense-only*: the reranker repairs the damage that pure semantic search does to precise queries.
 
-**Q03 (diagnosis) — an honest regression.**
+**Q03 (diagnosis): an honest regression.**
 Here there is no happy ending. BM25 scores 0.500; Hybrid+Rerank scores **0.250** — worse. The relevant document slips from rank 2 to rank 4. Hybrid retrieval is not a free lunch: on some queries the extra candidates crowd out a document BM25 had ranked reasonably. One regression out of seven is a real cost and it is the kind of thing that only shows up if you measure per-query instead of trusting the average.
 
 ---
